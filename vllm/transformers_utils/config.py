@@ -175,6 +175,7 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     step5="Step5Config",
     step5_vl="Step5VLConfig",
     ricursive="RicursiveConfig",
+    solar_open2="SolarOpen2Config",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
     unlimited_ocr="UnlimitedOCRConfig",
     **{"deepseek_v41": "DeepseekV41Config"},

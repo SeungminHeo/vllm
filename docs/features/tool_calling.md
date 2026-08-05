@@ -641,6 +641,14 @@ optional `<think>` block. Pair it with `--reasoning-parser ripple`.
 
 Flags: `--enable-auto-tool-choice --tool-call-parser ripple --reasoning-parser ripple`
 
+### Solar Open2 Models (`solar_open2`)
+
+Supported models:
+
+* `upstage/Solar-Open2-250B`
+
+Flags: `--tool-call-parser solar_open2 --reasoning-parser solar_open2`
+
 ### Models with Pythonic Tool Calls (`pythonic`)
 
 A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.

@@ -279,6 +279,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "zaya_engine_tool_parser",
         "ZayaEngineToolParser",
     ),
+    "solar_open2": (
+        "solar_open2_tool_parser",
+        "SolarOpen2ToolParser",
+    ),
 }
 
 

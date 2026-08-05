@@ -215,6 +215,7 @@ _TEXT_GENERATION_MODELS = {
     "Step5ForCausalLM": ("vllm.models.step5", "Step5ForCausalLM"),
     "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
+    "SolarOpen2ForCausalLM": ("solar_open2", "SolarOpen2ForCausalLM"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "TeleChat3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),

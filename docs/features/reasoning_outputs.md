@@ -33,6 +33,7 @@ vLLM currently supports the following reasoning models:
 | [Ripple-65B Preview](https://huggingface.co/ricursiveAI/Ripple-65B-Preview) | `ripple` | `json`, `regex` | ✅ |
 | [Step-3.5 / Step-3.7 Flash](https://huggingface.co/stepfun-ai/Step-3.5-Flash) | `step3p5` | `json`, `regex` | ✅ |
 | [ZAYA1 series](https://huggingface.co/Zyphra/ZAYA1-8B) | `zaya` | `json`, `regex` | ✅ |
+| [Solar Open2](https://huggingface.co/upstage/Solar-Open2-250B) | `solar_open2` | `json`, `regex` | ✅ |
 
 !!! note
     IBM Granite 3.2 and DeepSeek-V3.1 reasoning is disabled by default; to enable it, you must also pass `thinking=True` in your `chat_template_kwargs`.
@@ -278,7 +279,7 @@ To use this feature:
 
 If `thinking_token_budget` is not specified, no explicit reasoning limit is applied beyond normal generation constraints such as `max_tokens`.
 
-`--reasoning-config` accepts a JSON object corresponding to  
+`--reasoning-config` accepts a JSON object corresponding to
 [ReasoningConfig][vllm.config.ReasoningConfig] with the following fields:
 
 | Field                 | Type           | Description                                      |

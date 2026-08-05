@@ -201,6 +201,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "zaya_engine_reasoning_parser",
         "ZayaParserReasoningAdapter",
     ),
+    "solar_open2": (
+        "solar_open2_reasoning_parser",
+        "SolarOpen2ReasoningParser",
+    ),
 }
 
 
