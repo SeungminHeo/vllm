@@ -5601,7 +5601,9 @@ class GPUModelRunner(
 
         hf_config = self.speculative_config.draft_model_config.hf_config
 
-        layer_ids = getattr(hf_config, "eagle_aux_hidden_state_layer_ids", None)
+        layer_ids = getattr(
+            hf_config, "eagle_aux_hidden_state_layer_ids", None
+        ) or getattr(hf_config, "aux_hidden_state_layer_ids", None)
         if not layer_ids:
             dflash_config = getattr(hf_config, "dflash_config", None)
             eagle_config = getattr(hf_config, "eagle_config", None)

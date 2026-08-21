@@ -1618,6 +1618,13 @@ class VllmConfig:
             )
 
         if (
+            self.speculative_config is not None
+            and self.speculative_config.kv_cache_dtype is None
+            and self.cache_config.cache_dtype == "fp8_ds_mla"
+        ):
+            self.speculative_config.kv_cache_dtype = "auto"
+
+        if (
             self.model_config
             and self.model_config.architecture == "WhisperForConditionalGeneration"
             and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"

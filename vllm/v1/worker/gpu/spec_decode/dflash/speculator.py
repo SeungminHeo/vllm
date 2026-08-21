@@ -333,6 +333,13 @@ class DFlashSpeculator(DraftModelSpeculator):
     ) -> torch.Tensor:
         num_reqs = input_batch.num_reqs
         num_target_tokens = input_batch.num_tokens
+        if dummy_run:
+            # The profiling dummy batches max_num_reqs requests, but the draft
+            # expands each to num_query_per_req tokens, which can overflow the
+            # max_num_batched_tokens-sized draft/input buffers. The scheduler
+            # enforces this token budget at runtime, so clamp the dummy to the
+            # same bound.
+            num_reqs = min(num_reqs, self.max_num_tokens // self.num_query_per_req)
         num_query_tokens = num_reqs * self.num_query_per_req
         max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
         self.draft_max_seq_len = min(
@@ -351,10 +358,12 @@ class DFlashSpeculator(DraftModelSpeculator):
             hidden_states = last_hidden_states
         self.hidden_states[:num_target_tokens].copy_(hidden_states[:num_target_tokens])
 
-        if dummy_run and skip_attn_for_dummy_run:
-            # Memory profiling path: block_tables / kv_cache_config are not initialized.
-            # Since DFlash needs to build its own attention metadata, we must skip the
-            # preparation in this path and run a minimal forward pass.
+        if dummy_run:
+            # Dummy path (memory profiling and kernel-warmup dummies): the
+            # request state and block tables are placeholders, so the input-prep
+            # kernel would derive garbage positions and KV slots from them.
+            # Skip the preparation and run a minimal forward pass instead;
+            # CUDA graph capture goes through capture(), not this path.
             self.model.precompute_and_store_context_kv(
                 self.hidden_states[:num_target_tokens],
                 self.context_positions[:num_target_tokens],
@@ -362,13 +371,20 @@ class DFlashSpeculator(DraftModelSpeculator):
             # DFlash processes all speculative tokens in one forward pass,
             # so the real token count is num_query_tokens.
             self._prepare_eplb_forward(num_query_tokens)
+            # The target's dp_sync tensor holds the target batch size; the
+            # draft forward runs num_query_tokens per rank (identical across
+            # ranks during profiling), so resize the sync tensor accordingly.
             self._generate_draft(
                 num_reqs,
                 num_query_tokens,
                 attn_metadata=None,
                 slot_mappings=None,
                 num_tokens_across_dp=(
-                    dp_sync.num_tokens_across_dp if dp_sync is not None else None
+                    torch.full_like(
+                        dp_sync.num_tokens_across_dp, num_query_tokens
+                    )
+                    if dp_sync is not None
+                    else None
                 ),
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
             )
