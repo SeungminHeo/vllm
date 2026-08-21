@@ -462,6 +462,13 @@ class DFlashSpeculator(DraftModelSpeculator):
     ) -> torch.Tensor:
         num_reqs = input_batch.num_reqs
         num_target_tokens = input_batch.num_tokens
+        if dummy_run:
+            # The profiling dummy batches max_num_reqs requests, but the draft
+            # expands each to num_query_per_req tokens, which can overflow the
+            # max_num_batched_tokens-sized draft/input buffers. The scheduler
+            # enforces this token budget at runtime, so clamp the dummy to the
+            # same bound.
+            num_reqs = min(num_reqs, self.max_num_tokens // self.num_query_per_req)
         num_query_tokens = num_reqs * self.num_query_per_req
         max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
         self.draft_max_seq_len = min(
