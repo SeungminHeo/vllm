@@ -1,0 +1,102 @@
+# NVIDIA Dynamo runtime image for the A.X-K2 branch.
+#
+# Same overlay strategy and dual deployment flows as Dockerfile.axk2:
+#  * nightly flow (feature/ax-k2): base = vllm/vllm-openai:nightly-<sha>,
+#    <sha> binary-compatible with the branch merge-base (see Dockerfile.axk2).
+#  * release flow (release/ax-k2-v<tag>): base = vllm/vllm-openai:v<tag>.
+# Copy the branch's `vllm/` package over the base, then add the Dynamo runtime.
+#
+# `ai-dynamo[vllm]` pins `vllm==0.31.0`, which would clobber the overlaid
+# branch sources, so we install `ai-dynamo` without the extra and pull in the
+# extra's runtime deps (uvloop, blake3, ray, librosa, soundfile) explicitly.
+# The base already ships `nixl==1.5.0` (requirements/kv_connectors.txt);
+# reinstalling the extra's `nixl[cu13]==1.4.1` would downgrade it and drag
+# torch into the resolve, whose NCCL pin would undo the base's NCCL (DeepEPv2).
+# Every other base package is pinned too (Dynamo would otherwise pull
+# protobuf 7, breaking nvidia-cutlass-dsl and opentelemetry); only pydantic
+# (ai-dynamo-runtime's `pydantic<=2.13.5`), certifi (Dynamo 1.6.1's refreshed
+# CA bundle, `certifi>=2026.10.19`) and googleapis-common-protos (aisimulate
+# 0.13.0's `<1.75.4`, a patch-level downgrade) move.
+#
+# NOTE: Dynamo 1.6.1 is validated upstream against vllm 0.31.0;
+# the branch sits on nightly main, so smoke-test `python -m dynamo.vllm`
+# (aggregated + disagg prefill/decode) after any Dynamo or branch bump.
+#
+# Build (amd64):
+#   git archive HEAD vllm/ | tar -x -C <ctx>
+#   podman build --platform linux/amd64 -f docker/Dockerfile.axk2-dynamo \
+#       --build-arg VLLM_SRC_COMMIT=$(git rev-parse HEAD) \
+#       -t vllm-axk2-dynamo:<tag> <ctx>
+ARG VLLM_BASE_COMMIT=49cb2bbf71cfd36ee5aa33d1e184b1cddff55294
+ARG BASE_IMAGE=docker.io/vllm/vllm-openai:nightly-${VLLM_BASE_COMMIT}
+FROM ${BASE_IMAGE}
+
+ARG PYTHON_VERSION=3.12
+ARG VLLM_BASE_COMMIT
+ARG DYNAMO_VERSION=1.6.1
+# uv segfaults under qemu user emulation; override with
+# --build-arg INSTALLER="python3 -m pip install" for cross-arch local builds.
+ARG INSTALLER="uv pip install --system"
+ARG NIXL_VERSION=1.5.0
+ARG VLLM_SITE=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm
+
+COPY vllm/ ${VLLM_SITE}/
+
+RUN find ${VLLM_SITE} -name __pycache__ -type d -prune -exec rm -rf {} + \
+    && grep -q tensor_model_parallel_all_reduce ${VLLM_SITE}/models/axk2/nvidia/model.py \
+    && ls ${VLLM_SITE}/_C*.so ${VLLM_SITE}/_flashmla_C*.so >/dev/null
+
+RUN python3 -m pip list --format=freeze \
+        | grep -viE '^(pydantic(-core|_core)?|certifi|googleapis-common-protos)==' \
+        > /tmp/base-constraints.txt \
+    && ${INSTALLER} -c /tmp/base-constraints.txt \
+        "ai-dynamo==${DYNAMO_VERSION}" \
+        uvloop \
+        "blake3>=1.0.0,<2.0.0" \
+        "ray>=2.55.0" \
+        "librosa>=0.10.0" \
+        "soundfile>=0.13.1" \
+    && rm /tmp/base-constraints.txt \
+    && python3 -c "\
+import importlib.metadata as md, importlib.util; \
+assert md.version('ai-dynamo-runtime') == md.version('ai-dynamo'); \
+assert md.version('nixl-cu13') == '${NIXL_VERSION}', md.version('nixl-cu13'); \
+import dynamo.runtime; \
+assert all(importlib.util.find_spec(m) for m in ('dynamo.vllm', 'dynamo.frontend'))"
+
+# Dynamo 1.5.x / 1.6.x import `get_engine_zmq_addresses` at module load in a file
+# every `dynamo.vllm` worker imports; vLLM removed it in #54113. Stub it the
+# way Dynamo main resolves it (ai-dynamo/dynamo#16378): only
+# `--embedding-worker-processes > 1` calls it. Drop once the pinned Dynamo
+# release has that change.
+ARG DYNAMO_SITE=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/dynamo
+RUN f=${DYNAMO_SITE}/vllm/embedding_worker_processes.py \
+    && grep -qx 'from vllm.v1.engine.utils import get_engine_zmq_addresses, launch_core_engines' $f \
+    && sed -i 's|^from vllm.v1.engine.utils import get_engine_zmq_addresses, launch_core_engines$|from vllm.v1.engine.utils import launch_core_engines\n\n\ndef get_engine_zmq_addresses(*args, **kwargs):\n    raise RuntimeError("--embedding-worker-processes > 1 is not supported on this vLLM (vllm-project/vllm#54113)")|' $f \
+    && rm -rf ${DYNAMO_SITE}/vllm/__pycache__ \
+    && python3 -c "import ast; ast.parse(open('$f').read())"
+
+# InstrumentedScheduler (injected when the operator sets
+# DYN_FORWARDPASS_METRIC_PORT) reads Scheduler.skipped_waiting when the
+# vLLM 0.31 kv_holding_waiting queue is absent; vLLM main has neither (blocked
+# requests go back into `waiting`), so the first scheduled step raised
+# AttributeError and killed the engine. Fall back to an empty queue.
+RUN f=${DYNAMO_SITE}/vllm/instrumented_scheduler.py \
+    && grep -qx '            other_waiting = self.skipped_waiting' $f \
+    && sed -i 's|^            other_waiting = self.skipped_waiting$|            other_waiting = getattr(self, "skipped_waiting", ())|' $f \
+    && rm -rf ${DYNAMO_SITE}/vllm/__pycache__ \
+    && python3 -c "import ast; ast.parse(open('$f').read())"
+
+# The Dynamo operator/launch scripts pass full commands
+# (`python3 -m dynamo.vllm ...`, `python3 -m dynamo.frontend ...`),
+# so drop the `vllm serve` entrypoint inherited from the base image.
+ENTRYPOINT []
+CMD ["/bin/bash"]
+
+# Declared last so a commit-only change keeps the pip layer cached.
+ARG VLLM_SRC_COMMIT=unknown
+LABEL org.opencontainers.image.source="https://github.com/SeungminHeo/vllm/tree/feature/ax-k2" \
+      org.opencontainers.image.revision="${VLLM_SRC_COMMIT}" \
+      ai.skt.vllm.merge_base_commit="49cb2bbf71cfd36ee5aa33d1e184b1cddff55294" \
+      ai.skt.vllm.base_image_commit="${VLLM_BASE_COMMIT}" \
+      ai.skt.dynamo.version="${DYNAMO_VERSION}"
