@@ -52,6 +52,7 @@ class SharedExperts(torch.nn.Module):
         # index is always 0 and the second output list element is ignored.
         self.enable_dbo = enable_dbo
         self._output: list[torch.Tensor | None] = [None, None]
+        self._ran_in_aux_stream: list[bool] = [False, False]
         self._layer = layer
         self._moe_config = moe_config
 
@@ -100,7 +101,9 @@ class SharedExperts(torch.nn.Module):
         self,
         hidden_states: torch.Tensor,
     ) -> SharedExpertsOrder:
-        if self._disable_shared_experts_overlap:
+        if self._disable_shared_experts_overlap or (
+            current_platform.is_cuda() and torch.cuda.is_current_stream_capturing()
+        ):
             return SharedExpertsOrder.NO_OVERLAP
 
         if self._mk_can_overlap_shared_experts():
@@ -142,12 +145,10 @@ class SharedExperts(torch.nn.Module):
         self,
         shared_experts_input: torch.Tensor,
     ) -> torch.Tensor:
-        # TODO: assert that maybe_sync_shared_experts_stream has been called.
-
+        self._ran_in_aux_stream[self._output_idx] = True
         # Run shared experts in parallel on a separate stream.
         with torch.cuda.stream(self._stream):
             output = self._layer(shared_experts_input)
-        current_stream().wait_stream(self._stream)
 
         return output
 
@@ -158,6 +159,10 @@ class SharedExperts(torch.nn.Module):
     @property
     def output(self) -> torch.Tensor:
         assert self._output[self._output_idx] is not None
+        if self._ran_in_aux_stream[self._output_idx]:
+            assert self._stream is not None
+            current_stream().wait_stream(self._stream)
+            self._ran_in_aux_stream[self._output_idx] = False
         output = self._output[self._output_idx]
         self._output[self._output_idx] = None
         return output
