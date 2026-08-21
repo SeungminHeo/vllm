@@ -15,6 +15,7 @@ import importlib
 
 _CLASS_TO_MODULE: dict[str, str] = {
     "Alpamayo2SuperConfig": "vllm.transformers_utils.configs.alpamayo2_super",
+    "AXK2Config": "vllm.transformers_utils.configs.axk2",
     "BagelConfig": "vllm.transformers_utils.configs.bagel",
     "BailingMoeV3TextConfig": "vllm.transformers_utils.configs.bailing_moe_v3_vl",
     "BailingMoeV3VisionConfig": "vllm.transformers_utils.configs.bailing_moe_v3_vl",
@@ -96,6 +97,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
 
 __all__ = [
     "Alpamayo2SuperConfig",
+    "AXK2Config",
     "BagelConfig",
     "BailingMoeV3TextConfig",
     "BailingMoeV3VisionConfig",
