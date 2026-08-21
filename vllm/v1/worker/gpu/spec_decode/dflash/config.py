@@ -27,6 +27,14 @@ class DFlashSpeculatorConfig(DraftModelSpeculatorConfig):
     @classmethod
     def adapt_draft_model_config(cls, spec: "SpeculativeConfig") -> None:
         assert cls.base_method is not None
+        # DFlash / DSpark drafts name their auxiliary hidden state layers
+        # `aux_hidden_state_layer_ids`; expose them under the EAGLE3 key that
+        # the target-side readers use.
+        hf = spec.draft_model_config.hf_config
+        if getattr(hf, "eagle_aux_hidden_state_layer_ids", None) is None:
+            aux_ids = getattr(hf, "aux_hidden_state_layer_ids", None)
+            if aux_ids is not None:
+                hf.eagle_aux_hidden_state_layer_ids = aux_ids
         wrap_eagle_hf_config(spec, cls.base_method)
 
     @property
