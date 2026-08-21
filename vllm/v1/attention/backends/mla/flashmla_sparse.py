@@ -730,14 +730,39 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             ]
             if self.pcp_dcp_kv_gather:
                 specs.append(((prefill_workspace_size, head_size), torch.bfloat16))
+            if self.fp8_decode_padded_heads > num_heads:
+                self.q_padded_shape = (
+                    max_tokens,
+                    self.fp8_decode_padded_heads,
+                    head_size,
+                )
+                specs.append((self.q_padded_shape, torch.bfloat16))
             buffers = current_workspace_manager().get_simultaneous(*specs)
+            self.q_padded_buffer = (
+                buffers[-1] if self.fp8_decode_padded_heads > num_heads else None
+            )
             self.q_concat_buffer, self.prefill_bf16_workspace = buffers[:2]
             if self.pcp_dcp_kv_gather:
                 self.gathered_kv_workspace = buffers[2]
         else:
-            (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
-                (q_concat_shape, torch.bfloat16),
-            )
+            if self.fp8_decode_padded_heads > num_heads:
+                self.q_padded_shape = (
+                    max_tokens,
+                    self.fp8_decode_padded_heads,
+                    head_size,
+                )
+                (
+                    self.q_concat_buffer,
+                    self.q_padded_buffer,
+                ) = current_workspace_manager().get_simultaneous(
+                    (q_concat_shape, torch.bfloat16),
+                    (self.q_padded_shape, torch.bfloat16),
+                )
+            else:
+                self.q_padded_buffer = None
+                (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
+                    (q_concat_shape, torch.bfloat16),
+                )
 
     def _forward_bf16_kv(
         self,
@@ -1171,13 +1196,21 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
 
         # Pad query if needed (kernel only supports h_q = 64 or 128)
         if actual_num_heads < padded_num_heads:
-            logger.warning_once(
-                f"Padding num_heads from {actual_num_heads} to "
-                f"{padded_num_heads} for FP8 sparse decode kernel"
-            )
-            q_padded = q.new_zeros((q.size(0), q.size(1), padded_num_heads, q.size(3)))
-            q_padded[:, :, :actual_num_heads, :] = q
-            q = q_padded
+            batch_size, seq_len = q.size(0), q.size(1)
+            total_tokens = batch_size * seq_len
+            if hasattr(self, "q_padded_buffer") and self.q_padded_buffer is not None:
+                q_padded = self.q_padded_buffer[:total_tokens].view(
+                    batch_size, seq_len, padded_num_heads, q.size(3)
+                )
+                q_padded.zero_()
+                q_padded[:, :, :actual_num_heads, :] = q
+                q = q_padded
+            else:
+                q_padded = q.new_zeros(
+                    (batch_size, seq_len, padded_num_heads, q.size(3))
+                )
+                q_padded[:, :, :actual_num_heads, :] = q
+                q = q_padded
 
         out, lse = flash_mla_with_kvcache(
             q=q,
@@ -1193,7 +1226,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
 
         # Slice output and lse back to actual head count if we padded
         if actual_num_heads < padded_num_heads:
-            out = out[:, :, :actual_num_heads, :]
+            out = out[:, :, :actual_num_heads, :].contiguous()
             lse = lse[:, :actual_num_heads, :]
 
         return out, lse
