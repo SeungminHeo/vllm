@@ -580,6 +580,12 @@ class MoERunner(MoERunnerInterface):
         via the router, and the actual fused MoE computation. Returns
         (shared_expert_output, fused_expert_output).
         """
+        # Multi-stream overlap: launch shared experts concurrently in aux_stream
+        self._maybe_sync_shared_experts_stream(shared_experts_input)
+        self._maybe_apply_shared_experts(
+            shared_experts_input,
+            SharedExpertsOrder.MULTI_STREAM_OVERLAPPED,
+        )
         self._maybe_apply_shared_experts(
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
@@ -607,11 +613,6 @@ class MoERunner(MoERunnerInterface):
                 shared_experts=self._shared_experts,
                 shared_experts_input=shared_experts_input,
             )
-
-        self._maybe_apply_shared_experts(
-            shared_experts_input,
-            SharedExpertsOrder.MULTI_STREAM_OVERLAPPED,
-        )
 
         return (
             self._shared_experts.output if self._shared_experts is not None else None,
