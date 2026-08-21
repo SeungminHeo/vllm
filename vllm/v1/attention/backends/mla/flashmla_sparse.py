@@ -811,9 +811,19 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                     (max_tokens, prefill_query_heads, self.kv_lora_rank),
                 )
             )
+        self.fp8_decode_q_padded_specs: list[tuple[tuple[int, ...], torch.dtype]] = []
+        if (
+            is_quantized_kv_cache(kv_cache_dtype)
+            and self.fp8_decode_padded_heads > num_heads
+        ):
+            self.fp8_decode_q_padded_specs.append(
+                ((max_tokens, self.fp8_decode_padded_heads, head_size), torch.bfloat16)
+            )
         # Reserve capacity without retaining views that prevent old storage
         # from being released when another layer grows the shared workspace.
-        current_workspace_manager().get_simultaneous(*self.workspace_specs)
+        current_workspace_manager().get_simultaneous(
+            *self.workspace_specs, *self.fp8_decode_q_padded_specs
+        )
 
     def _forward_bf16_kv(
         self,
@@ -1253,11 +1263,17 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
 
         # Pad query if needed (kernel only supports h_q = 64 or 128)
         if actual_num_heads < padded_num_heads:
-            logger.warning_once(
-                f"Padding num_heads from {actual_num_heads} to "
-                f"{padded_num_heads} for FP8 sparse decode kernel"
-            )
-            q_padded = q.new_zeros((q.size(0), q.size(1), padded_num_heads, q.size(3)))
+            batch_size, seq_len = q.size(0), q.size(1)
+            padded_shape = (batch_size, seq_len, padded_num_heads, q.size(3))
+            if self.fp8_decode_q_padded_specs:
+                # Placed after workspace_specs so it never aliases q_concat.
+                *_, q_padded_buffer = current_workspace_manager().get_simultaneous(
+                    *self.workspace_specs, *self.fp8_decode_q_padded_specs
+                )
+                q_padded = q_padded_buffer[: batch_size * seq_len].view(padded_shape)
+                q_padded[:, :, actual_num_heads:, :].zero_()
+            else:
+                q_padded = q.new_zeros(padded_shape)
             q_padded[:, :, :actual_num_heads, :] = q
             q = q_padded
 
