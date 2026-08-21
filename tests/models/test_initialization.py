@@ -114,13 +114,17 @@ def can_initialize(
                 "(see #41376)"
             )
 
-    if model_arch in ["DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"]:
+    if model_arch in [
+        "DeepseekV32ForCausalLM",
+        "GlmMoeDsaForCausalLM",
+        "AXK2ForCausalLM",
+    ]:
         from vllm.platforms import current_platform
 
         capability = current_platform.get_device_capability()
         if capability and capability.major < 9:
             pytest.skip(
-                f"DeepseekV32 requires Hopper (9.0+) or Blackwell (10.0+) "
+                f"{model_arch} requires Hopper (9.0+) or Blackwell (10.0+) "
                 f"for FLASHMLA_SPARSE backend. Current device has compute "
                 f"capability {capability.major}.{capability.minor}"
             )

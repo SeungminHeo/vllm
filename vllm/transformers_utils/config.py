@@ -73,6 +73,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
     arctic="ArcticConfig",
     axk1="AXK1Config",
+    axk2="AXK2Config",
     bagel="BagelConfig",
     umm="CheersConfig",
     chatglm="ChatGLMConfig",
