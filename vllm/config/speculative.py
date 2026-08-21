@@ -1045,6 +1045,11 @@ class SpeculativeConfig:
 
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
+                    hf = self.draft_model_config.hf_config
+                    if getattr(hf, "eagle_aux_hidden_state_layer_ids", None) is None:
+                        aux_ids = getattr(hf, "aux_hidden_state_layer_ids", None)
+                        if aux_ids is not None:
+                            hf.eagle_aux_hidden_state_layer_ids = aux_ids
 
                 if (
                     self.method == "dspark"
