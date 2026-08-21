@@ -1,0 +1,35 @@
+# Serving image for the A.X-K2 internal branch (feature/ax-k2).
+#
+# The branch only changes Python/Triton sources on top of upstream main
+# bd8865a29, so we reuse an upstream-built `vllm-openai` image whose compiled
+# extensions are identical to bd8865a29 (no csrc/cmake/setup.py/requirements
+# change between the two commits) and copy the branch's `vllm/` package over it.
+#
+# Build (amd64):
+#   git archive HEAD vllm/ | tar -x -C <ctx>
+#   podman build --platform linux/amd64 -f docker/Dockerfile.axk2 \
+#       --build-arg VLLM_SRC_COMMIT=$(git rev-parse HEAD) -t vllm-axk2:<tag> <ctx>
+#
+# Upstream only publishes one nightly tag per day, so VLLM_BASE_COMMIT is the
+# closest nightly that is binary-compatible with the branch's merge-base.
+# If the branch is rebased, re-check with:
+#   git diff --stat <nightly_sha> <merge_base> -- csrc cmake setup.py requirements docker/Dockerfile
+ARG VLLM_BASE_COMMIT=d626108b1841888ec90aced33367149a6bbc7e4b
+ARG BASE_IMAGE=docker.io/vllm/vllm-openai:nightly-${VLLM_BASE_COMMIT}
+FROM ${BASE_IMAGE}
+
+ARG PYTHON_VERSION=3.12
+ARG VLLM_SRC_COMMIT=unknown
+ARG VLLM_BASE_COMMIT
+ARG VLLM_SITE=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm
+
+COPY vllm/ ${VLLM_SITE}/
+
+RUN find ${VLLM_SITE} -name __pycache__ -type d -prune -exec rm -rf {} + \
+    && grep -q tensor_model_parallel_all_reduce ${VLLM_SITE}/models/axk2/nvidia/model.py \
+    && ls ${VLLM_SITE}/_C*.so ${VLLM_SITE}/_flashmla_C*.so >/dev/null
+
+LABEL org.opencontainers.image.source="https://github.com/SeungminHeo/vllm/tree/feature/ax-k2" \
+      org.opencontainers.image.revision="${VLLM_SRC_COMMIT}" \
+      ai.skt.vllm.merge_base_commit="bd8865a299c4a68cff9b6443b9fd795f4c4735f6" \
+      ai.skt.vllm.base_image_commit="${VLLM_BASE_COMMIT}"
