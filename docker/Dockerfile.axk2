@@ -14,7 +14,7 @@
 # closest nightly that is binary-compatible with the branch's merge-base.
 # If the branch is rebased, re-check with:
 #   git diff --stat <nightly_sha> <merge_base> -- csrc cmake setup.py requirements docker/Dockerfile
-ARG VLLM_BASE_COMMIT=d626108b1841888ec90aced33367149a6bbc7e4b
+ARG VLLM_BASE_COMMIT=f94666b60d4c58ec0807d22c837cfae322a1dde9
 ARG BASE_IMAGE=docker.io/vllm/vllm-openai:nightly-${VLLM_BASE_COMMIT}
 FROM ${BASE_IMAGE}
 
