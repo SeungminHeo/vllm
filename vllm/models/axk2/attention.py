@@ -112,8 +112,7 @@ class AXK2Attention(DeepseekV32Attention):
             indexer_k_norm_bias = self.indexer.k_norm.bias
             indexer_k_norm_eps = self.indexer.k_norm.eps
             indexer_k_rope_cos_sin_cache = self.indexer_rope_emb.cos_sin_cache
-            indexer_k_cache = None if self.use_pcp else self.indexer.k_cache.kv_cache
-            index_k_out = torch.empty_like(index_k) if self.use_pcp else None
+            indexer_k_cache = self.indexer.k_cache.kv_cache
             indexer_softmax_scale = self.indexer.softmax_scale
             indexer_n_head_scale = self.indexer.n_head**-0.5
         else:
@@ -123,11 +122,10 @@ class AXK2Attention(DeepseekV32Attention):
             indexer_k_norm_eps = 1e-6
             indexer_k_rope_cos_sin_cache = None
             indexer_k_cache = None
-            index_k_out = None
             indexer_softmax_scale = 0.0
             indexer_n_head_scale = 0.0
 
-        if attn_metadata is None or self.use_pcp:
+        if attn_metadata is None:
             mla_kv_cache = None
             mla_k_scale = None
             indexer_k_cache = None
@@ -136,8 +134,6 @@ class AXK2Attention(DeepseekV32Attention):
             mla_kv_cache = self.kv_cache
             mla_k_scale = self._k_scale
 
-        kv_c_out = torch.empty_like(kv_c)
-        k_pe_out = torch.empty_like(k_pe)
         q_c_prenorm = q_c
         q_c = fused_norm_rope(
             positions,
@@ -162,9 +158,6 @@ class AXK2Attention(DeepseekV32Attention):
             mla_k_scale=mla_k_scale,
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
-            kv_c_out=kv_c_out,
-            k_pe_out=k_pe_out,
-            index_k_out=index_k_out,
         )
 
         if self.attn_gate_fused:
@@ -222,15 +215,9 @@ class AXK2Attention(DeepseekV32Attention):
         )
 
         self._sparse_indexer_and_attn(
-            positions,
             q_c,
-            q_nope,
-            q_pe,
             index_q_fp8,
-            index_k_out,
             index_weights_out,
-            kv_c_out,
-            k_pe_out,
             ql_nope,
             mqa_q,
             output,
