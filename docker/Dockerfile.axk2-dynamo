@@ -1,0 +1,61 @@
+# NVIDIA Dynamo runtime image for the A.X-K2 branch.
+#
+# Same overlay strategy and dual deployment flows as Dockerfile.axk2:
+#  * nightly flow (feature/ax-k2): base = vllm/vllm-openai:nightly-<sha>,
+#    <sha> binary-compatible with the branch merge-base (see Dockerfile.axk2).
+#  * release flow (release/ax-k2-v<tag>): base = vllm/vllm-openai:v<tag>.
+# Copy the branch's `vllm/` package over the base, then add the Dynamo runtime.
+#
+# `ai-dynamo[vllm]` pins `vllm==0.26.0`, which would clobber the overlaid
+# branch sources, so we install `ai-dynamo` without the extra and pull in the
+# extra's runtime deps (nixl, uvloop, blake3) explicitly. The base image is
+# CUDA 13 (upstream default 13.0.3), hence `nixl[cu13]`.
+#
+# NOTE: Dynamo 1.4.2 is validated upstream against vllm 0.26.0;
+# the branch sits on nightly main, so smoke-test `python -m dynamo.vllm`
+# (aggregated + disagg prefill/decode) after any Dynamo or branch bump.
+#
+# Build (amd64):
+#   git archive HEAD vllm/ | tar -x -C <ctx>
+#   podman build --platform linux/amd64 -f docker/Dockerfile.axk2-dynamo \
+#       --build-arg VLLM_SRC_COMMIT=$(git rev-parse HEAD) \
+#       -t vllm-axk2-dynamo:<tag> <ctx>
+ARG VLLM_BASE_COMMIT=27a94d1ce4e3fc100c4732439ccec10f8246a804
+ARG BASE_IMAGE=docker.io/vllm/vllm-openai:nightly-${VLLM_BASE_COMMIT}
+FROM ${BASE_IMAGE}
+
+ARG PYTHON_VERSION=3.12
+ARG VLLM_SRC_COMMIT=unknown
+ARG VLLM_BASE_COMMIT
+ARG DYNAMO_VERSION=1.4.2
+ARG NIXL_VERSION=1.3.2
+ARG VLLM_SITE=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm
+
+COPY vllm/ ${VLLM_SITE}/
+
+RUN find ${VLLM_SITE} -name __pycache__ -type d -prune -exec rm -rf {} + \
+    && grep -q tensor_model_parallel_all_reduce ${VLLM_SITE}/models/axk2/nvidia/model.py \
+    && ls ${VLLM_SITE}/_C*.so ${VLLM_SITE}/_flashmla_C*.so >/dev/null
+
+RUN uv pip install --system \
+        "ai-dynamo==${DYNAMO_VERSION}" \
+        "nixl[cu13]==${NIXL_VERSION}" \
+        uvloop \
+        "blake3>=1.0.0,<2.0.0" \
+    && python3 -c "\
+import importlib.metadata as md, importlib.util; \
+assert md.version('ai-dynamo-runtime') == md.version('ai-dynamo'); \
+assert md.version('vllm') != '0.26.0', 'ai-dynamo pulled in pinned vllm'; \
+import dynamo.runtime; \
+assert all(importlib.util.find_spec(m) for m in ('dynamo.vllm', 'dynamo.frontend'))"
+
+# The Dynamo operator/launch scripts pass full commands
+# (`python3 -m dynamo.vllm ...`, `python3 -m dynamo.frontend ...`),
+# so drop the `vllm serve` entrypoint inherited from the base image.
+ENTRYPOINT []
+CMD ["/bin/bash"]
+
+LABEL org.opencontainers.image.source="https://github.com/SeungminHeo/vllm/tree/feature/ax-k2" \
+      org.opencontainers.image.revision="${VLLM_SRC_COMMIT}" \
+      ai.skt.vllm.base_image_commit="${VLLM_BASE_COMMIT}" \
+      ai.skt.dynamo.version="${DYNAMO_VERSION}"
