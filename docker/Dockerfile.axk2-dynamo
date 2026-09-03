@@ -28,6 +28,9 @@ ARG PYTHON_VERSION=3.12
 ARG VLLM_SRC_COMMIT=unknown
 ARG VLLM_BASE_TAG
 ARG DYNAMO_VERSION=1.4.2
+# uv segfaults under qemu user emulation; override with
+# --build-arg INSTALLER="python3 -m pip install" for cross-arch local builds.
+ARG INSTALLER="uv pip install --system"
 ARG NIXL_VERSION=1.3.2
 ARG VLLM_SITE=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm
 
@@ -37,7 +40,7 @@ RUN find ${VLLM_SITE} -name __pycache__ -type d -prune -exec rm -rf {} + \
     && grep -q tensor_model_parallel_all_reduce ${VLLM_SITE}/models/axk2/nvidia/model.py \
     && ls ${VLLM_SITE}/_C*.so ${VLLM_SITE}/_flashmla_C*.so >/dev/null
 
-RUN uv pip install --system \
+RUN ${INSTALLER} \
         "ai-dynamo==${DYNAMO_VERSION}" \
         "nixl[cu13]==${NIXL_VERSION}" \
         uvloop \
