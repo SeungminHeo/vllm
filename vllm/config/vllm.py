@@ -1317,6 +1317,7 @@ class VllmConfig:
             and any(
                 a
                 in (
+                    "AXK2ForCausalLM",
                     "DeepseekV4ForCausalLM",
                     "DeepSeekV4MTPModel",
                     "InklingForCausalLM",
