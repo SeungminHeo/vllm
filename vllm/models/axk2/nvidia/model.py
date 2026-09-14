@@ -45,6 +45,10 @@ from vllm.models.deepseek_v32.nvidia.model import (
     DeepseekV32ForCausalLM,
     DeepseekV32Model,
 )
+from vllm.v1.attention.backends.mla.index_group import (
+    SparseMLAIndexGroupBuilder,
+    get_sparse_mla_index_group_max_rows,
+)
 
 
 def _apply_layernorm(
@@ -83,6 +87,7 @@ class AXK2DecoderLayer(DeepseekV32DecoderLayer):
         prefix: str,
         config=None,
         topk_indices_buffer: torch.Tensor | None = None,
+        index_group_builder: SparseMLAIndexGroupBuilder | None = None,
     ) -> None:
         torch.nn.Module.__init__(self)
 
@@ -106,6 +111,7 @@ class AXK2DecoderLayer(DeepseekV32DecoderLayer):
             config=config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
+            index_group_builder=index_group_builder,
         )
 
         if (
@@ -234,6 +240,15 @@ class AXK2Model(DeepseekV32Model, EagleModelMixin):
             )
         else:
             topk_indices_buffer = None
+        self.topk_indices_buffer = topk_indices_buffer
+        index_group_builder = (
+            SparseMLAIndexGroupBuilder(
+                topk_indices_buffer,
+                get_sparse_mla_index_group_max_rows(vllm_config),
+            )
+            if topk_indices_buffer is not None
+            else None
+        )
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -254,6 +269,7 @@ class AXK2Model(DeepseekV32Model, EagleModelMixin):
                 vllm_config=vllm_config,
                 prefix=prefix,
                 topk_indices_buffer=topk_indices_buffer,
+                index_group_builder=index_group_builder,
             ),
             prefix=f"{prefix}.layers",
         )

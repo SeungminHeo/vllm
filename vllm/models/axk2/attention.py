@@ -6,11 +6,13 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.models.axk2.common.fused_gated_rmsnorm_quant import fused_gate_act_quant
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.transformers_utils.configs.axk2 import AXK2Config
+from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilder
 
 
 class AXK2Attention(DeepseekV32Attention):
@@ -32,6 +34,7 @@ class AXK2Attention(DeepseekV32Attention):
         prefix: str,
         topk_indices_buffer: torch.Tensor | None = None,
         attn_backend: type | None = None,
+        index_group_builder: SparseMLAIndexGroupBuilder | None = None,
     ) -> None:
         super().__init__(
             vllm_config=vllm_config,
@@ -39,6 +42,7 @@ class AXK2Attention(DeepseekV32Attention):
             prefix=prefix,
             topk_indices_buffer=topk_indices_buffer,
             attn_backend=attn_backend,
+            index_group_builder=index_group_builder,
         )
         self.use_output_gate = getattr(config, "attention_output_gate", False)
         self.attn_gate_fused = self.use_output_gate and getattr(
@@ -105,6 +109,14 @@ class AXK2Attention(DeepseekV32Attention):
         slot_mapping = forward_context.slot_mapping
         assert isinstance(slot_mapping, dict)
         mla_slot = slot_mapping.get(self.layer_name)
+        indexer_slot = (
+            slot_mapping.get(self.indexer.k_cache.prefix)
+            if self.indexer is not None
+            else None
+        )
+        hisparse_cache = self.hisparse_cache
+        layer_attn_metadata, _, _, _ = get_attention_context(self.layer_name)
+        self.impl.prepare_for_batch(layer_attn_metadata)
 
         if self.indexer is not None and not self.skip_topk:
             has_indexer = True
@@ -132,8 +144,9 @@ class AXK2Attention(DeepseekV32Attention):
             mla_k_scale = None
             indexer_k_cache = None
             mla_slot = None
+            indexer_slot = None
         else:
-            mla_kv_cache = self.kv_cache
+            mla_kv_cache = None if hisparse_cache is not None else self.kv_cache
             mla_k_scale = self._k_scale
 
         kv_c_out = torch.empty_like(kv_c)
@@ -156,6 +169,7 @@ class AXK2Attention(DeepseekV32Attention):
             indexer_k_rope_cos_sin_cache,
             self.topk_indices_buffer,
             slot_mapping=mla_slot,
+            indexer_slot_mapping=indexer_slot,
             indexer_k_cache=indexer_k_cache,
             mla_kv_cache=mla_kv_cache,
             mla_kv_cache_dtype=self.kv_cache_dtype,
@@ -166,6 +180,17 @@ class AXK2Attention(DeepseekV32Attention):
             k_pe_out=k_pe_out,
             index_k_out=index_k_out,
         )
+
+        if hisparse_cache is not None and mla_slot is not None:
+            self.update_kv_cache(
+                kv_c_out,
+                k_pe_out,
+                self.kv_cache,
+                mla_slot,
+                layer_attn_metadata,
+                self.kv_cache_dtype,
+                self._k_scale,
+            )
 
         if self.attn_gate_fused:
             assert self.q_lora_rank is not None

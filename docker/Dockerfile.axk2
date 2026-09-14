@@ -5,6 +5,8 @@
 #    where <sha> must be binary-compatible with the branch merge-base — verify with
 #      git diff --stat <nightly_sha> <merge_base> -- csrc cmake CMakeLists.txt setup.py requirements docker/Dockerfile
 #    (empty diff = compatible). Use for shipping bleeding-edge features fast.
+#    This Python overlay retains the base image's Rust frontend binary;
+#    rebuild the full upstream Dockerfile to include newer Rust-only fixes.
 #  * release flow (release/ax-k2-v<tag> branches): base = vllm/vllm-openai:v<tag>,
 #    binary-exact by construction. Build there with --build-arg VLLM_BASE_TAG=<tag>.
 #
@@ -12,7 +14,7 @@
 #   git archive HEAD vllm/ | tar -x -C <ctx>
 #   podman build --platform linux/amd64 -f docker/Dockerfile.axk2 \
 #       --build-arg VLLM_SRC_COMMIT=$(git rev-parse HEAD) -t vllm-openai:<tag> <ctx>
-ARG VLLM_BASE_COMMIT=27a94d1ce4e3fc100c4732439ccec10f8246a804
+ARG VLLM_BASE_COMMIT=dc36fcce902a63eab06c1b93a5c4a5ee178a0c56
 ARG BASE_IMAGE=docker.io/vllm/vllm-openai:nightly-${VLLM_BASE_COMMIT}
 FROM ${BASE_IMAGE}
 
@@ -29,5 +31,5 @@ RUN find ${VLLM_SITE} -name __pycache__ -type d -prune -exec rm -rf {} + \
 
 LABEL org.opencontainers.image.source="https://github.com/SeungminHeo/vllm/tree/feature/ax-k2" \
       org.opencontainers.image.revision="${VLLM_SRC_COMMIT}" \
-      ai.skt.vllm.merge_base_commit="44fe2a392b71d52a8d72faf2f8278834379482c9" \
+      ai.skt.vllm.merge_base_commit="e6b4e47d2d894a1a0815fbf03669adb1b3405083" \
       ai.skt.vllm.base_image_commit="${VLLM_BASE_COMMIT}"
