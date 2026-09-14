@@ -79,6 +79,7 @@ ROCM_DEFAULT_MRV1_ARCHITECTURES = frozenset(
 
 DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
     {
+        "AXK2ForCausalLM",
         "DeepseekV32MTPModel",
         "DeepseekV32ForCausalLM",
         "DeepseekV4ForCausalLM",
