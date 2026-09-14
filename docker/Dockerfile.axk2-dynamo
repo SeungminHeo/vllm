@@ -20,7 +20,7 @@
 #   podman build --platform linux/amd64 -f docker/Dockerfile.axk2-dynamo \
 #       --build-arg VLLM_SRC_COMMIT=$(git rev-parse HEAD) \
 #       -t vllm-axk2-dynamo:<tag> <ctx>
-ARG VLLM_BASE_TAG=v0.28.0
+ARG VLLM_BASE_TAG=v0.29.0
 ARG BASE_IMAGE=docker.io/vllm/vllm-openai:${VLLM_BASE_TAG}
 FROM ${BASE_IMAGE}
 
@@ -58,7 +58,7 @@ assert all(importlib.util.find_spec(m) for m in ('dynamo.vllm', 'dynamo.frontend
 ENTRYPOINT []
 CMD ["/bin/bash"]
 
-LABEL org.opencontainers.image.source="https://github.com/SeungminHeo/vllm/tree/feature/ax-k2" \
+LABEL org.opencontainers.image.source="https://github.com/SeungminHeo/vllm/tree/release/ax-k2-v0.29.0" \
       org.opencontainers.image.revision="${VLLM_SRC_COMMIT}" \
       ai.skt.vllm.base_image_tag="${VLLM_BASE_TAG}" \
       ai.skt.dynamo.version="${DYNAMO_VERSION}"
