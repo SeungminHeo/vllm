@@ -1,5 +1,22 @@
 # A.X-K2 vLLM Handover (2026-09-04)
 
+## 2026-09-14 rebase update
+
+- `feature/ax-k2`: upstream `e6b4e47d2d894a1a0815fbf03669adb1b3405083`.
+  CUDA/Python overlay base: `nightly-dc36fcce902a63eab06c1b93a5c4a5ee178a0c56`.
+  Build inputs (`csrc`, `cmake`, `CMakeLists.txt`, `setup.py`, `requirements`,
+  `docker/Dockerfile`) match; the newer Rust frontend logprob fix requires a full build.
+- `release/ax-k2-v0.29.0`: official `v0.29.0` (`98dff2a81d`), base image `v0.29.0`.
+  The v0.28.0 attention downport was dropped to restore the 12-argument PCP API.
+  `release/ax-k2-v0.28.0` remains available unchanged.
+- Both branches retain automatic breakable CUDA graphs for AX-K2 and explicit opt-out.
+  Main also carries the sparse index-group / separate slot-mapping integration.
+- Dynamo remains at 1.4.2. Main uses NIXL 1.4.1; release uses 1.3.2.
+  Dynamo 1.4.2's vLLM extra pins vLLM 0.26.0, so both pairings need runtime validation.
+- Static checks passed locally. No image build, CUDA runtime test, IFBench run,
+  or new acceptance measurement was performed for these rebases.
+  The historical results and unresolved issues below are not validation of the new heads.
+
 > 환경: k8s context **axiom-ipp**, namespace `model-serving`. 결과/스크립트는 NFS `/t1data/axk2-bench/`
 > (모든 서빙 pod에 `/t1data`로 마운트; NFS: `172.27.7.122:/axiom_ipp_pvc_47890b91_f2a7_4a63_9ebc_9436024d8a1a`).
 > Claude 세션 메모리: `~/.claude/projects/-Users-1112991-orca-vllm/memory/` (axk2-pod-context, deepgemm-driver-regression 등).

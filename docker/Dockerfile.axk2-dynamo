@@ -14,13 +14,15 @@
 # NOTE: Dynamo 1.4.2 is validated upstream against vllm 0.26.0;
 # the branch sits on nightly main, so smoke-test `python -m dynamo.vllm`
 # (aggregated + disagg prefill/decode) after any Dynamo or branch bump.
+# NIXL follows this branch's requirements/kv_connectors.txt (1.4.1), which is
+# newer than Dynamo 1.4.2's vllm extra (1.3.2); validate both transfer peers.
 #
 # Build (amd64):
 #   git archive HEAD vllm/ | tar -x -C <ctx>
 #   podman build --platform linux/amd64 -f docker/Dockerfile.axk2-dynamo \
 #       --build-arg VLLM_SRC_COMMIT=$(git rev-parse HEAD) \
 #       -t vllm-axk2-dynamo:<tag> <ctx>
-ARG VLLM_BASE_COMMIT=27a94d1ce4e3fc100c4732439ccec10f8246a804
+ARG VLLM_BASE_COMMIT=dc36fcce902a63eab06c1b93a5c4a5ee178a0c56
 ARG BASE_IMAGE=docker.io/vllm/vllm-openai:nightly-${VLLM_BASE_COMMIT}
 FROM ${BASE_IMAGE}
 
@@ -31,7 +33,7 @@ ARG DYNAMO_VERSION=1.4.2
 # uv segfaults under qemu user emulation; override with
 # --build-arg INSTALLER="python3 -m pip install" for cross-arch local builds.
 ARG INSTALLER="uv pip install --system"
-ARG NIXL_VERSION=1.3.2
+ARG NIXL_VERSION=1.4.1
 ARG VLLM_SITE=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm
 
 COPY vllm/ ${VLLM_SITE}/
