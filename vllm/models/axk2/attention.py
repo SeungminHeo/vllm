@@ -40,6 +40,11 @@ class AXK2Attention(DeepseekV32Attention):
             topk_indices_buffer=topk_indices_buffer,
             attn_backend=attn_backend,
         )
+        # forward() always runs the top-k MQA path (no dense-MHA prefill), so
+        # the indexer must score every prefill. With the inherited short-prefill
+        # skip, prompts of reorder_batch_threshold < n <= index_topk tokens are
+        # dense-MHA-eligible, get no top-k indices, and attend over garbage.
+        self._dense_mha_metadata_layer_name = ""
         self.use_output_gate = getattr(config, "attention_output_gate", False)
         self.attn_gate_fused = self.use_output_gate and getattr(
             config, "attn_gate_fused", True
