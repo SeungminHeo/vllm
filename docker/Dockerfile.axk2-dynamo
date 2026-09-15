@@ -22,7 +22,7 @@
 #   podman build --platform linux/amd64 -f docker/Dockerfile.axk2-dynamo \
 #       --build-arg VLLM_SRC_COMMIT=$(git rev-parse HEAD) \
 #       -t vllm-axk2-dynamo:<tag> <ctx>
-ARG VLLM_BASE_COMMIT=dc36fcce902a63eab06c1b93a5c4a5ee178a0c56
+ARG VLLM_BASE_COMMIT=cd10ed6f9f6b37a8ace9cf380007e66fe12ec0c3
 ARG BASE_IMAGE=docker.io/vllm/vllm-openai:nightly-${VLLM_BASE_COMMIT}
 FROM ${BASE_IMAGE}
 
