@@ -14,6 +14,9 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    scaled_dequantize,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
@@ -203,6 +206,54 @@ class AXK2DecoderLayer(DeepseekV32DecoderLayer):
         return hidden_states, residual
 
 
+def _dequant_modelopt_fp8_indexer_wk(
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Pre-dequantize ModelOpt per-tensor FP8 indexer ``wk`` to BF16.
+
+    The shared DSA loader fuses ``wk`` into the BF16 ``wk_weights_proj`` GEMM
+    and only understands block or channel ``weight_scale_inv``. A scalar
+    ``weight_scale`` and the static ``input_scale`` would otherwise reach the
+    stacked mapping and fail. Any other ``wk`` layout passes through untouched.
+    """
+    pending: dict[str, dict[str, torch.Tensor]] = {}
+    for name, loaded_weight in weights:
+        if ".indexer.wk." not in name:
+            yield name, loaded_weight
+            continue
+        prefix, suffix = name.rsplit(".wk.", 1)
+        if suffix == "input_scale":
+            continue  # No consumer: the fused GEMM runs in BF16.
+        is_fp8_weight = (
+            suffix == "weight" and loaded_weight.dtype == torch.float8_e4m3fn
+        )
+        is_scalar_scale = suffix == "weight_scale" and loaded_weight.ndim == 0
+        if not (is_fp8_weight or is_scalar_scale):
+            # Not the ModelOpt per-tensor layout: release anything held for
+            # this layer and hand the tensor over unchanged.
+            for held_suffix, held in pending.pop(prefix, {}).items():
+                yield f"{prefix}.wk.{held_suffix}", held
+            yield name, loaded_weight
+            continue
+        entry = pending.setdefault(prefix, {})
+        entry[suffix] = loaded_weight
+        if "weight" in entry and "weight_scale" in entry:
+            del pending[prefix]
+            yield (
+                f"{prefix}.wk.weight",
+                scaled_dequantize(
+                    entry["weight"],
+                    entry["weight_scale"],
+                    out_dtype=torch.bfloat16,
+                ),
+            )
+    # Unpaired tensors are handed over as-is so the shared loader reports
+    # them instead of silently dropping weights.
+    for prefix, entry in pending.items():
+        for held_suffix, held in entry.items():
+            yield f"{prefix}.wk.{held_suffix}", held
+
+
 class AXK2Model(DeepseekV32Model, EagleModelMixin):
     """A.X-K2 Model extending DeepseekV32Model with Eagle/DSpark support."""
 
@@ -287,7 +338,9 @@ class AXK2Model(DeepseekV32Model, EagleModelMixin):
                                 break
                 yield name, loaded_weight
 
-        return super().load_weights(_remap_weights(weights))
+        return super().load_weights(
+            _remap_weights(_dequant_modelopt_fp8_indexer_wk(weights))
+        )
 
 
 class AXK2ForCausalLM(
