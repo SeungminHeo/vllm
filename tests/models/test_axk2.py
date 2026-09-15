@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for A.X K2 model architecture, configuration, and helpers."""
 
+import pytest
 import torch
 from torch import nn
 
@@ -258,3 +259,63 @@ def test_axk2_supports_eagle_and_dspark():
 
     assert supports_eagle(AXK2ForCausalLM)
     assert supports_eagle3(AXK2ForCausalLM)
+
+
+def _modelopt_fp8_wk_pairs(prefix: str, scale_first: bool):
+    weight = torch.randn(128, 64).to(torch.float8_e4m3fn)
+    scale = torch.tensor(0.03125)
+    pairs = [
+        (f"{prefix}.wk.weight", weight),
+        (f"{prefix}.wk.weight_scale", scale),
+    ]
+    if scale_first:
+        pairs.reverse()
+    return weight, scale, pairs
+
+
+@pytest.mark.parametrize("scale_first", [False, True])
+def test_dequant_modelopt_fp8_indexer_wk(scale_first):
+    """ModelOpt per-tensor FP8 wk is emitted as one BF16 weight, in either
+    checkpoint order, and its input_scale is dropped."""
+    prefix = "layers.3.self_attn.indexer"
+    weight, scale, pairs = _modelopt_fp8_wk_pairs(prefix, scale_first)
+    stream = [
+        (f"{prefix}.wq_b.weight", torch.zeros(2, 2)),
+        (f"{prefix}.wk.input_scale", torch.tensor(1.0)),
+        *pairs,
+        (f"{prefix}.weights_proj.weight", torch.zeros(4, 64, dtype=torch.bfloat16)),
+    ]
+
+    out = list(axk2._dequant_modelopt_fp8_indexer_wk(stream))
+
+    assert [name for name, _ in out] == [
+        f"{prefix}.wq_b.weight",
+        f"{prefix}.wk.weight",
+        f"{prefix}.weights_proj.weight",
+    ]
+    dequant = dict(out)[f"{prefix}.wk.weight"]
+    assert dequant.dtype == torch.bfloat16
+    assert torch.equal(dequant, (weight.float() * scale).to(torch.bfloat16))
+
+
+@pytest.mark.parametrize("scale_first", [False, True])
+def test_dequant_modelopt_fp8_indexer_wk_passthrough(scale_first):
+    """Block-scaled FP8 (weight_scale_inv) and BF16 wk are left to the shared
+    loader untouched; only the stream order may change."""
+    prefix = "layers.3.self_attn.indexer"
+    pairs = [
+        (f"{prefix}.wk.weight", torch.randn(128, 64).to(torch.float8_e4m3fn)),
+        (f"{prefix}.wk.weight_scale_inv", torch.rand(1, 1)),
+    ]
+    if scale_first:
+        pairs.reverse()
+    stream = [
+        *pairs,
+        ("layers.4.self_attn.indexer.wk.weight", torch.zeros(128, 64)),
+    ]
+
+    out = dict(axk2._dequant_modelopt_fp8_indexer_wk(stream))
+
+    assert sorted(out) == sorted(name for name, _ in stream)
+    for name, tensor in stream:
+        assert out[name] is tensor
