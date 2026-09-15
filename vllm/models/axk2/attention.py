@@ -93,16 +93,7 @@ class AXK2Attention(DeepseekV32Attention):
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
             )
-        forward_context = get_forward_context()
-        attn_metadata_raw = forward_context.attn_metadata
-        if isinstance(attn_metadata_raw, dict):
-            attn_metadata = attn_metadata_raw.get(self.layer_name)
-        elif isinstance(attn_metadata_raw, list):
-            attn_metadata = attn_metadata_raw[0].get(self.layer_name)
-        else:
-            attn_metadata = attn_metadata_raw
-
-        slot_mapping = forward_context.slot_mapping
+        slot_mapping = get_forward_context().slot_mapping
         assert isinstance(slot_mapping, dict)
         mla_slot = slot_mapping.get(self.layer_name)
 
@@ -127,12 +118,19 @@ class AXK2Attention(DeepseekV32Attention):
             indexer_softmax_scale = 0.0
             indexer_n_head_scale = 0.0
 
-        if attn_metadata is None or self.use_pcp:
+        if mla_slot is None or self.use_pcp:
+            # No KV cache bound yet (memory profiling), or PCP where the parent
+            # writes the cache after the gather: skip the fused cache writes.
             mla_kv_cache = None
             mla_k_scale = None
             indexer_k_cache = None
             mla_slot = None
         else:
+            # Keep the fused cache write in the captured region even when
+            # attn_metadata is None: the V1 model runner's breakable PIECEWISE
+            # capture runs without attention metadata, and the dummy run fills
+            # slot_mapping with -1 so the kernel skips at capture and writes
+            # real slots on replay.
             mla_kv_cache = self.kv_cache
             mla_k_scale = self._k_scale
 
