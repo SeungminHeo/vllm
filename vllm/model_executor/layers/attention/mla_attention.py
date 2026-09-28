@@ -2946,6 +2946,27 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     batch_size=chunk.num_requests,
                     seq_starts=chunk.starts,
                 )
+            elif self.kv_cache_dtype == "nvfp4_ds_mla":
+                if chunk.is_continuation:
+                    # The kernel has no seq_starts; starts are block-aligned,
+                    # so advance each block-table row instead.
+                    num_cols = chunk_block_table.shape[1]
+                    cols = torch.arange(
+                        num_cols, device=chunk_block_table.device, dtype=torch.int32
+                    )
+                    shifted_cols = cols + (
+                        chunk.starts // kv_c_and_k_pe_cache.shape[1]
+                    ).to(torch.int32).unsqueeze(1)
+                    chunk_block_table = chunk_block_table.gather(
+                        1, shifted_cols.clamp_(max=num_cols - 1).long()
+                    )
+                ops.cp_gather_and_upconvert_nvfp4_kv_cache(
+                    kv_c_and_k_pe_cache.view(torch.uint8),
+                    workspace[:toks],
+                    chunk_block_table,
+                    chunk.cu_seq_lens,
+                    chunk.num_requests,
+                )
             elif current_platform.is_cpu():
                 assert not is_quantized_kv_cache(self.kv_cache_dtype), (
                     "CPU MLA context gather fallback only supports "
