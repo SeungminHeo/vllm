@@ -2,12 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 
-class AXK2Config(PretrainedConfig):
-    r"""
-    Configuration class for the AXK2 model.
+class AXK2Config(PreTrainedConfig):
+    r"""Configuration class for the AXK2 model.
     Extends AXK1 with gated normalization and attention output gating.
     """
 
