@@ -65,6 +65,7 @@ def matrix_absorption(q_nope: torch.Tensor, w_uk_t: torch.Tensor) -> torch.Tenso
 
     Returns:
         q_absorbed: [B, H, 128] Absorbed query tensor in latent space
+
     """
     # q_nope: [B, H, 64], w_uk_t: [H, 64, 128] -> q_absorbed: [B, H, 128]
     return torch.einsum("bhd,hdm->bhm", q_nope, w_uk_t)
@@ -131,6 +132,7 @@ def gather_paged_kv_tokens(
 
     Returns:
         gathered_kv: [seq_len, head_size]
+
     """
     head_size = kv_cache.shape[-1]
     gathered = kv_cache.new_empty(seq_len, head_size)
@@ -175,6 +177,7 @@ def axk2_native_mla_decode_reference(
 
     Returns:
         output: [B, H, 64] Final attention output per head
+
     """
     b, h, _ = q_nope.shape
     if scale is None:
@@ -286,6 +289,7 @@ def verify_axk2_native_mla_vs_flashmla(
 
     Returns:
         (is_identical, max_abs_diff)
+
     """
     if atol is None:
         atol = (
