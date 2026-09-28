@@ -1,26 +1,17 @@
-# Serving image overlay for the A.X-K2 branch.
-#
-# Two deployment flows share this Dockerfile:
-#  * nightly flow (this branch, feature/ax-k2): base = vllm/vllm-openai:nightly-<sha>
-#    where <sha> must be binary-compatible with the branch merge-base — verify with
-#      git diff --stat <nightly_sha> <merge_base> -- csrc cmake CMakeLists.txt setup.py requirements docker/Dockerfile
-#    (empty diff = compatible). Use for shipping bleeding-edge features fast.
-#    This Python overlay retains the base image's Rust frontend binary;
-#    rebuild the full upstream Dockerfile to include newer Rust-only fixes.
-#  * release flow (release/ax-k2-v<tag> branches): base = vllm/vllm-openai:v<tag>,
-#    binary-exact by construction. Build there with --build-arg VLLM_BASE_TAG=<tag>.
+# Serving image overlay for A.X-K2 on the v0.30.0 release.
+# The branch adds Python/Triton sources over the matching official image.
 #
 # Build (amd64):
 #   git archive HEAD vllm/ | tar -x -C <ctx>
 #   podman build --platform linux/amd64 -f docker/Dockerfile.axk2 \
-#       --build-arg VLLM_SRC_COMMIT=$(git rev-parse HEAD) -t vllm-openai:<tag> <ctx>
-ARG VLLM_BASE_COMMIT=dc36fcce902a63eab06c1b93a5c4a5ee178a0c56
-ARG BASE_IMAGE=docker.io/vllm/vllm-openai:nightly-${VLLM_BASE_COMMIT}
+#       --build-arg VLLM_SRC_COMMIT=$(git rev-parse HEAD) -t vllm-axk2:<tag> <ctx>
+ARG VLLM_BASE_TAG=v0.30.0
+ARG BASE_IMAGE=docker.io/vllm/vllm-openai:${VLLM_BASE_TAG}
 FROM ${BASE_IMAGE}
 
 ARG PYTHON_VERSION=3.12
 ARG VLLM_SRC_COMMIT=unknown
-ARG VLLM_BASE_COMMIT
+ARG VLLM_BASE_TAG
 ARG VLLM_SITE=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm
 
 COPY vllm/ ${VLLM_SITE}/
@@ -29,7 +20,7 @@ RUN find ${VLLM_SITE} -name __pycache__ -type d -prune -exec rm -rf {} + \
     && grep -q tensor_model_parallel_all_reduce ${VLLM_SITE}/models/axk2/nvidia/model.py \
     && ls ${VLLM_SITE}/_C*.so ${VLLM_SITE}/_flashmla_C*.so >/dev/null
 
-LABEL org.opencontainers.image.source="https://github.com/SeungminHeo/vllm/tree/feature/ax-k2" \
+LABEL org.opencontainers.image.source="https://github.com/SeungminHeo/vllm/tree/release/ax-k2-v0.30.0" \
       org.opencontainers.image.revision="${VLLM_SRC_COMMIT}" \
-      ai.skt.vllm.merge_base_commit="e6b4e47d2d894a1a0815fbf03669adb1b3405083" \
-      ai.skt.vllm.base_image_commit="${VLLM_BASE_COMMIT}"
+      ai.skt.vllm.merge_base_commit="ced6857afa0ea7b2e3f0846a62e1394e90f15607" \
+      ai.skt.vllm.base_image_tag="${VLLM_BASE_TAG}"
