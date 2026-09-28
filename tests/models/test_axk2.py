@@ -6,6 +6,7 @@ import pytest
 import torch
 from torch import nn
 
+import vllm.models.axk2.gated_rmsnorm as axk2_gated_rmsnorm
 import vllm.models.axk2.nvidia.model as axk2
 from vllm.model_executor.models.axk2 import (
     PartialRMSNorm,
@@ -135,7 +136,7 @@ def test_axk2_gated_rmsnorm(default_vllm_config, monkeypatch):
         def forward(self, x):
             return self.linear(x), None
 
-    monkeypatch.setattr(axk2, "ReplicatedLinear", TestLinear)
+    monkeypatch.setattr(axk2_gated_rmsnorm, "ReplicatedLinear", TestLinear)
     hidden_size = 64
     rank = 16
     gated_norm = AXK2GatedRMSNorm(
