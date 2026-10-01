@@ -1797,7 +1797,16 @@ class Scheduler(SchedulerInterface):
             structured_output_request_ids,
             scheduler_output.scheduled_spec_decode_tokens,
         )
-        return GrammarOutput(structured_output_request_ids, bitmask)
+        spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+        num_acceptable_drafts = []
+        for req_id in structured_output_request_ids:
+            tokens = spec_tokens.get(req_id, [])
+            num_acceptable_drafts.append(
+                tokens.index(-1) if -1 in tokens else len(tokens)
+            )
+        return GrammarOutput(
+            structured_output_request_ids, bitmask, num_acceptable_drafts
+        )
 
     def update_from_output(
         self,
