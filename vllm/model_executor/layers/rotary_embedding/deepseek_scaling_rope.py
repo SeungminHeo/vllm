@@ -120,7 +120,6 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         offsets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """PyTorch-native implementation equivalent to forward()."""
-        assert key is not None
         return self.forward_static(
             positions,
             query,
@@ -144,12 +143,11 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         offsets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """A static implementation of forward()."""
-        assert key is not None
         query_rot = query[..., :rotary_dim]
-        key_rot = key[..., :rotary_dim]
+        key_rot = key[..., :rotary_dim] if key is not None else None
         if rotary_dim < head_size:
             query_pass = query[..., rotary_dim:]
-            key_pass = key[..., rotary_dim:]
+            key_pass = key[..., rotary_dim:] if key is not None else None
 
         cos_sin = cos_sin_cache[
             torch.add(positions, offsets) if offsets is not None else positions
@@ -163,12 +161,15 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
             sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
 
         rotate_fn = rotate_neox if is_neox_style else rotate_gptj
-        query_rot = query_rot * cos + rotate_fn(query_rot) * sin
-        key_rot = key_rot * cos + rotate_fn(key_rot) * sin
+        # The cache stays fp32 when FlashInfer is enabled; keep the input dtype.
+        orig_dtype = query.dtype
+        query_rot = (query_rot * cos + rotate_fn(query_rot) * sin).to(orig_dtype)
+        if key_rot is not None:
+            key_rot = (key_rot * cos + rotate_fn(key_rot) * sin).to(orig_dtype)
 
         if rotary_dim < head_size:
             query = torch.cat((query_rot, query_pass), dim=-1)
-            key = torch.cat((key_rot, key_pass), dim=-1)
+            key = torch.cat((key_rot, key_pass), dim=-1) if key is not None else None
         else:
             query = query_rot
             key = key_rot
@@ -207,7 +208,8 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         key: torch.Tensor | None = None,
         offsets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if self.use_flashinfer:
+        # FlashInfer's RoPE kernel requires a key.
+        if self.use_flashinfer and key is not None:
             torch.ops.vllm.flashinfer_rotary_embedding(
                 torch.add(positions, offsets) if offsets is not None else positions,
                 query,
