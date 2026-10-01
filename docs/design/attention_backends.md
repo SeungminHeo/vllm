@@ -122,6 +122,12 @@ ValueError: Selected backend FLASHMLA is not valid for this configuration.
 Reason: ['compute capability not supported']
 ```
 
+> **Note:** The selected backend applies to every model in the process,
+> including a speculative-decoding draft. Pinning a sparse MLA backend such as
+> `FLASHINFER_MLA_SPARSE` for a DeepSeek-V3.2-style target therefore fails on a
+> dense-MLA draft (e.g. EAGLE3) with `non-sparse not supported`. Leave the
+> backend unset so the target and the draft each select their own.
+
 ### Automatic Selection
 
 When no backend is specified (the default):
