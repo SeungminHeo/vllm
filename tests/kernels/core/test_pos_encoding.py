@@ -8,7 +8,10 @@ import pytest
 import torch
 
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
-from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding import (
+    DeepseekScalingRotaryEmbedding,
+    get_rope,
+)
 from vllm.utils.torch_utils import set_random_seed
 
 IS_NEOX_STYLE = [True, False]
@@ -120,6 +123,33 @@ def test_rotary_embedding(
         )
     else:
         assert ref_key is None and out_key is None, "expected returned key to be None"
+
+
+@pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
+@pytest.mark.parametrize("rotary_dim", [64, 32])
+@torch.inference_mode()
+def test_deepseek_scaling_rope_query_only(
+    default_vllm_config, is_neox_style: bool, rotary_dim: int
+) -> None:
+    """DeepSeek sparse MLA rotates the dense-MHA query without a key.
+
+    FlashInfer's kernel needs a key, so that call takes the native path with
+    the fp32 cos/sin cache and must still return the query in its own dtype.
+    """
+    head_size, max_position, num_tokens = 64, 4096, 11
+    rope = DeepseekScalingRotaryEmbedding(
+        head_size, rotary_dim, max_position, 10000, is_neox_style, 40, torch.float32
+    )
+    positions = torch.randint(0, max_position, (num_tokens,))
+    query = torch.randn(num_tokens, 17, head_size, dtype=torch.bfloat16)
+    key = torch.randn(num_tokens, 1, head_size, dtype=torch.bfloat16)
+
+    ref_query, _ = rope(positions, query, key)
+    out_query, out_key = rope(positions, query)
+
+    assert out_key is None
+    assert out_query.dtype == query.dtype
+    torch.testing.assert_close(out_query, ref_query)
 
 
 @torch.inference_mode()
