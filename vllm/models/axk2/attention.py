@@ -25,6 +25,10 @@ class AXK2Attention(DeepseekV32Attention):
     2. Sigmoid gate modulation on attention output before o_proj.
     3. Reuses the entire DeepSeek Sparse Attention (DSA) Indexer backend and
        FlashMLA / FlashInfer sparse execution paths from DeepSeek V3.2.
+
+    forward() mirrors DeepseekV32Attention.forward as of upstream 89439db727;
+    re-sync it whenever the parent's forward changes. Deltas: fused q + gate
+    GEMM, output gate, single-token decode buffers, slot-gated KV-cache write.
     """
 
     def __init__(
@@ -69,6 +73,7 @@ class AXK2Attention(DeepseekV32Attention):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        # Captured: A-projections (+ indexer A-GEMM on indexer layers).
         qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
         q_c, kv_c, k_pe = qkv_lora.split(
             [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
@@ -97,7 +102,8 @@ class AXK2Attention(DeepseekV32Attention):
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
             )
-        slot_mapping = get_forward_context().slot_mapping
+        forward_context = get_forward_context()
+        slot_mapping = forward_context.slot_mapping
         assert isinstance(slot_mapping, dict)
         mla_slot = slot_mapping.get(self.layer_name)
         indexer_slot = (
@@ -109,12 +115,16 @@ class AXK2Attention(DeepseekV32Attention):
         layer_attn_metadata, _, _, _ = get_attention_context(self.layer_name)
         self.impl.prepare_for_batch(layer_attn_metadata)
 
+        prepare_mqa_query = self._should_prepare_mqa_query(
+            layer_attn_metadata, forward_context.cudagraph_runtime_mode
+        )
         if self.indexer is not None and not self.skip_topk:
             has_indexer = True
             indexer_k_norm_w = self.indexer.k_norm.weight
             indexer_k_norm_bias = self.indexer.k_norm.bias
             indexer_k_norm_eps = self.indexer.k_norm.eps
             indexer_k_rope_cos_sin_cache = self.indexer_rope_emb.cos_sin_cache
+            indexer_cache_shuffled = self.indexer.k_cache.uses_shuffled_layout
             indexer_k_cache = None if self.use_pcp else self.indexer.k_cache.kv_cache
             index_k_out = torch.empty_like(index_k) if self.use_pcp else None
             indexer_softmax_scale = self.indexer.softmax_scale
@@ -126,6 +136,7 @@ class AXK2Attention(DeepseekV32Attention):
             indexer_k_norm_eps = 1e-6
             indexer_k_rope_cos_sin_cache = None
             indexer_k_cache = None
+            indexer_cache_shuffled = False
             index_k_out = None
             indexer_softmax_scale = 0.0
             indexer_n_head_scale = 0.0
@@ -169,6 +180,7 @@ class AXK2Attention(DeepseekV32Attention):
             slot_mapping=mla_slot,
             indexer_slot_mapping=indexer_slot,
             indexer_k_cache=indexer_k_cache,
+            indexer_cache_shuffled=indexer_cache_shuffled,
             mla_kv_cache=mla_kv_cache,
             mla_kv_cache_dtype=self.kv_cache_dtype,
             mla_k_scale=mla_k_scale,
@@ -223,10 +235,13 @@ class AXK2Attention(DeepseekV32Attention):
             gate = None
 
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        if q_nope.shape[0] == 1:
-            ql_nope = torch.matmul(q_nope.unsqueeze(-2), self.W_UK_T).squeeze(-2)
+        if prepare_mqa_query:
+            if q_nope.shape[0] == 1:
+                ql_nope = torch.matmul(q_nope.unsqueeze(-2), self.W_UK_T).squeeze(-2)
+            else:
+                ql_nope = torch.bmm(q_nope.transpose(0, 1), self.W_UK_T).transpose(0, 1)
         else:
-            ql_nope = torch.bmm(q_nope.transpose(0, 1), self.W_UK_T).transpose(0, 1)
+            ql_nope = q_nope
 
         if self.indexer is not None and not self.skip_topk:
             index_q = self.indexer.wq_b(q_c)[0]
@@ -247,7 +262,7 @@ class AXK2Attention(DeepseekV32Attention):
             indexer_n_head_scale,
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
-            quantize_mqa=self._fp8_query,
+            quantize_mqa=self._fp8_query and prepare_mqa_query,
         )
 
         self._sparse_indexer_and_attn(
