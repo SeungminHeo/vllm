@@ -14,7 +14,7 @@
 #   git archive HEAD vllm/ | tar -x -C <ctx>
 #   podman build --platform linux/amd64 -f docker/Dockerfile.axk2 \
 #       --build-arg VLLM_SRC_COMMIT=$(git rev-parse HEAD) -t vllm-openai:<tag> <ctx>
-ARG VLLM_BASE_COMMIT=dc36fcce902a63eab06c1b93a5c4a5ee178a0c56
+ARG VLLM_BASE_COMMIT=18f8f96025b556071eb627076f94df560fbd3a22
 ARG BASE_IMAGE=docker.io/vllm/vllm-openai:nightly-${VLLM_BASE_COMMIT}
 FROM ${BASE_IMAGE}
 
