@@ -1207,6 +1207,28 @@ def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatc
     assert streams == []
 
 
+def test_sparse_mla_index_groups_share_one_side_stream(monkeypatch):
+    """A stream per group overflows torch's stream pool and aliases streams."""
+    streams: list[object] = []
+
+    def create_stream(_device):
+        streams.append(object())
+        return streams[-1]
+
+    monkeypatch.setattr(index_group_module, "_create_side_stream", create_stream)
+    monkeypatch.setattr(index_group_module, "_create_event", lambda: object())
+    index_group_builder = index_group_module.SparseMLAIndexGroupBuilder(
+        torch.empty((2, 4), dtype=torch.int32)
+    )
+
+    first_index_group, _ = index_group_builder.register_layer(True)
+    second_index_group, _ = index_group_builder.register_layer(True)
+
+    assert second_index_group is not first_index_group
+    assert second_index_group.side_stream is first_index_group.side_stream
+    assert len(streams) == 1
+
+
 def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     worker = object.__new__(HiSparseConnectorWorker)
     worker._initialized = True
