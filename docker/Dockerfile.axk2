@@ -14,7 +14,7 @@
 #   git archive HEAD vllm/ | tar -x -C <ctx>
 #   podman build --platform linux/amd64 -f docker/Dockerfile.axk2 \
 #       --build-arg VLLM_SRC_COMMIT=$(git rev-parse HEAD) -t vllm-openai:<tag> <ctx>
-ARG VLLM_BASE_COMMIT=18f8f96025b556071eb627076f94df560fbd3a22
+ARG VLLM_BASE_COMMIT=21d93d0d8c0e9627900020382bfce4730e61cab7
 ARG BASE_IMAGE=docker.io/vllm/vllm-openai:nightly-${VLLM_BASE_COMMIT}
 FROM ${BASE_IMAGE}
 
@@ -31,5 +31,5 @@ RUN find ${VLLM_SITE} -name __pycache__ -type d -prune -exec rm -rf {} + \
 
 LABEL org.opencontainers.image.source="https://github.com/SeungminHeo/vllm/tree/feature/ax-k2" \
       org.opencontainers.image.revision="${VLLM_SRC_COMMIT}" \
-      ai.skt.vllm.merge_base_commit="89439db7276cf165377c088496e20098c8137727" \
+      ai.skt.vllm.merge_base_commit="e11962fc1ce542c725dacda6f641daed8d54337f" \
       ai.skt.vllm.base_image_commit="${VLLM_BASE_COMMIT}"
