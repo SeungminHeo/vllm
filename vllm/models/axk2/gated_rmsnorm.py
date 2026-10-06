@@ -108,11 +108,23 @@ def axk2_gated_rmsnorm_triton(
     orig_shape = x.shape
     H = orig_shape[-1]
     M = x.numel() // H
+    R = w_down.shape[0]
+
+    # The kernel indexes raw pointers and stores bf16.
+    assert x.dtype == torch.bfloat16
+    assert w_norm.shape == (H,) and w_norm.is_contiguous()
+    assert w_down.shape == (R, H) and w_down.is_contiguous()
+    assert w_up.shape == (H, R) and w_up.is_contiguous()
 
     x_2d = x.reshape(M, H)
-    residual_2d = residual.reshape(M, H) if residual is not None else None
+    assert x_2d.stride(-1) == 1
+    residual_2d: torch.Tensor | None = None
+    if residual is not None:
+        assert residual.shape == x.shape and residual.dtype == x.dtype
+        # view, not reshape: a copy would drop the in-place residual update.
+        residual_2d = residual.view(M, H)
+        assert residual_2d.stride(-1) == 1
 
-    R = w_down.shape[0]
     BLOCK_H = _next_power_of_2(H)
 
     out_2d = torch.empty_like(x_2d)
