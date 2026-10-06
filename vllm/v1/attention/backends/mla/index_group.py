@@ -341,6 +341,14 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         return ready
 
 
+def _create_side_stream(device: torch.device) -> torch.Stream:
+    return torch.Stream(device=device)
+
+
+def _create_event() -> torch.Event:
+    return torch.Event()
+
+
 class SparseMLAIndexGroupBuilder:
     """Assign sparse MLA layers to their index-producing layer."""
 
@@ -354,6 +362,19 @@ class SparseMLAIndexGroupBuilder:
             else max_decode_rows
         )
         self.current_group: SparseMLAIndexGroup | None = None
+        self.side_stream: torch.Stream | None = None
+
+    def _side_stream_for(self, group_cls: type[SparseMLAIndexGroup]) -> torch.Stream:
+        device = self.logical_topk_indices.device
+        if group_cls is not SparseMLAIndexGroup:
+            return _create_side_stream(device)
+        # torch hands out pooled CUDA streams round-robin (32 per device), so
+        # a stream per group makes unrelated streams alias in deep models.
+        # The compute stream joins each convert before the next group starts,
+        # so the groups can share one.
+        if self.side_stream is None:
+            self.side_stream = _create_side_stream(device)
+        return self.side_stream
 
     def register_layer(
         self,
@@ -384,9 +405,9 @@ class SparseMLAIndexGroupBuilder:
                     dtype=torch.int32,
                     device=self.logical_topk_indices.device,
                 ),
-                side_stream=torch.Stream(device=self.logical_topk_indices.device),
-                logical_topk_ready=torch.Event(),
-                physical_topk_ready=torch.Event(),
+                side_stream=self._side_stream_for(group_cls),
+                logical_topk_ready=_create_event(),
+                physical_topk_ready=_create_event(),
                 has_indexer=is_index_producing_layer,
             )
         group = self.current_group
