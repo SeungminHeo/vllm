@@ -52,9 +52,10 @@ class AXK3GatedResidualDecoderLayer(AXK2DecoderLayer):
         hidden_states, write_gate = self.attn_gated_residual.read(stream)
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
         hidden_states = tensor_model_parallel_all_reduce(hidden_states)
-        stream = self.attn_gated_residual.write(stream, hidden_states, write_gate)
+        stream, hidden_states, write_gate = self.attn_gated_residual.write_read(
+            stream, hidden_states, write_gate, self.mlp_gated_residual
+        )
 
-        hidden_states, write_gate = self.mlp_gated_residual.read(stream)
         hidden_states = self.mlp(hidden_states)
         hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         return self.mlp_gated_residual.write(stream, hidden_states, write_gate)
