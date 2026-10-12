@@ -297,6 +297,7 @@ class ModelArchConfigConvertorBase:
         elif self.hf_text_config.model_type in (
             "axk1",
             "axk2",
+            "axk3",
             "deepseek_v2",
             "deepseek_v3",
             "deepseek_v32",
@@ -334,6 +335,7 @@ class ModelArchConfigConvertorBase:
                 in (
                     "axk1",
                     "axk2",
+                    "axk3",
                     "deepseek_v2",
                     "deepseek_v3",
                     "deepseek_v32",

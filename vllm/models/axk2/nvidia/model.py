@@ -140,7 +140,9 @@ class AXK2DecoderLayer(DeepseekV32DecoderLayer):
                 reduce_results=False,
                 is_sequence_parallel=self.use_sequence_parallel,
             )
+        self._init_norms(config, prefix)
 
+    def _init_norms(self, config, prefix: str) -> None:
         use_gated_norm = getattr(config, "gated_norm", False)
         gated_rank = getattr(config, "gated_norm_rank", 16)
         if use_gated_norm:
@@ -264,6 +266,7 @@ class AXK2Model(DeepseekV32Model, EagleModelMixin):
     """A.X-K2 Model extending DeepseekV32Model with Eagle/DSpark support."""
 
     fall_back_to_pt_during_load = False
+    layer_cls: type[AXK2DecoderLayer] = AXK2DecoderLayer
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(DeepseekV32Model, self).__init__()
@@ -316,7 +319,7 @@ class AXK2Model(DeepseekV32Model, EagleModelMixin):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: AXK2DecoderLayer(
+            lambda prefix: self.layer_cls(
                 vllm_config=vllm_config,
                 prefix=prefix,
                 topk_indices_buffer=topk_indices_buffer,
@@ -369,3 +372,16 @@ class AXK2ForCausalLM(
     """A.X-K2 Causal Language Model inheriting DeepSeek V3.2 architecture."""
 
     model_cls = AXK2Model
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        config = vllm_config.model_config.hf_config
+        if config.model_type == "axk2" and (
+            getattr(config, "gated_residual", False)
+            or getattr(config, "dsa_index_share", False)
+        ):
+            raise ValueError(
+                "gated_residual and dsa_index_share belong to the A.X-K3 family. "
+                "Load this checkpoint with --hf-overrides "
+                '\'{"model_type": "axk3", "architectures": ["AXK3ForCausalLM"]}\'.'
+            )
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
