@@ -50,6 +50,7 @@ tests/lora/test_qwen3moe_tp.py  # --ignore'd from sharded LoRA run; no dedicated
 
 # tests/models/ - the models_*.yaml jobs run specific paths, not all of models/.
 tests/models/test_axk2.py  # A.X-K2 fork-only model; no models_*.yaml job collects this path
+tests/models/test_axk3.py  # A.X-K3 fork-only model; no models_*.yaml job collects this path
 
 # tests/v1/ - the v1 subtree is otherwise covered by many `pytest v1/...` jobs.
 tests/v1/ec_connector/integration/test_epd_correctness.py  # run_epd_correctness_test.sh exists but no Buildkite job invokes it
