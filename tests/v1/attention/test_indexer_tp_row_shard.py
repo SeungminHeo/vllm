@@ -105,6 +105,27 @@ def test_balanced_row_shard_partitions_and_declines(tp_size: int) -> None:
     assert indexer.balanced_prefill_row_shard(lens, lens, ratio, 1) is None
 
 
+def test_row_shard_floor_follows_env_override(monkeypatch) -> None:
+    """VLLM_SPARSE_INDEXER_TP_SHARD_MIN_ROWS_PER_RANK moves the activation
+    floor; unset keeps the built-in one."""
+    tp_size = 8
+    # 6,144 new rows on top of a 10,240-token cached prefix.
+    query_lens = torch.tensor([6144], dtype=torch.int32)
+    seq_lens = torch.tensor([16384], dtype=torch.int32)
+    name = "VLLM_SPARSE_INDEXER_TP_SHARD_MIN_ROWS_PER_RANK"
+
+    monkeypatch.delenv(name, raising=False)
+    assert indexer.balanced_prefill_row_shard(seq_lens, query_lens, 1, tp_size) is None
+
+    monkeypatch.setenv(name, "1024")
+    assert indexer.balanced_prefill_row_shard(seq_lens, query_lens, 1, tp_size) is None
+
+    monkeypatch.setenv(name, "512")
+    sizes = indexer.balanced_prefill_row_shard(seq_lens, query_lens, 1, tp_size)
+    assert sizes is not None and len(sizes) == tp_size
+    assert sum(sizes) == 6144 and min(sizes) >= 1
+
+
 def test_row_sharding_gate_rejects_unsupported_configurations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

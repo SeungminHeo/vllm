@@ -216,7 +216,10 @@ def balanced_prefill_row_shard(
 ) -> list[int] | None:
     """Return contiguous TP row counts balanced by indexer MQA work."""
     num_rows = int(query_lens_cpu.sum())
-    if tp_size < 2 or num_rows < MIN_TP_SHARD_ROWS_PER_RANK * tp_size:
+    min_rows_per_rank = envs.VLLM_SPARSE_INDEXER_TP_SHARD_MIN_ROWS_PER_RANK
+    if min_rows_per_rank is None:
+        min_rows_per_rank = MIN_TP_SHARD_ROWS_PER_RANK
+    if tp_size < 2 or num_rows < max(min_rows_per_rank, 1) * tp_size:
         return None
 
     query_lens = query_lens_cpu.to(torch.int64)
@@ -1583,6 +1586,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.compress_ratio,
                     self.tp_size,
                 )
+                if row_shard_sizes is not None:
+                    logger.info_once(
+                        "Sparse indexer prefill rows are sharded across %d TP ranks",
+                        self.tp_size,
+                    )
             prefill_metadata = DeepseekV32IndexerPrefillMetadata(
                 chunks,
                 max_prefill_seq_len=(
