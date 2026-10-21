@@ -77,6 +77,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -92,6 +93,25 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+def _load_padded_kv_a_layernorm(
+    param: torch.Tensor, loaded_weight: torch.Tensor
+) -> None:
+    param.data.zero_()
+    param.data[: loaded_weight.shape[0]].copy_(loaded_weight)
+
+
+def _make_kv_a_layernorm(config: AXK1Config, kv_lora_rank: int) -> RMSNorm:
+    """A.X-K1-Light zero-pads the latent from `kv_lora_rank_actual` to
+    `kv_lora_rank` (kernel-supported size) in `kv_a_proj_with_mqa` and
+    `kv_b_proj`, but its `kv_a_layernorm` weight keeps the actual size and
+    normalizes over the actual rank only."""
+    actual_rank = getattr(config, "kv_lora_rank_actual", None) or kv_lora_rank
+    norm = RMSNorm(kv_lora_rank, eps=config.rms_norm_eps, var_hidden_size=actual_rank)
+    if actual_rank != kv_lora_rank:
+        set_weight_attrs(norm.weight, {"weight_loader": _load_padded_kv_a_layernorm})
+    return norm
 
 
 class AXK1MLP(DeepseekV2MLP):
@@ -304,7 +324,7 @@ class AXK1Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.kv_a_proj_with_mqa",
         )
-        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=config.rms_norm_eps)
+        self.kv_a_layernorm = _make_kv_a_layernorm(config, self.kv_lora_rank)
         self.kv_b_proj = ColumnParallelLinear(
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
@@ -476,7 +496,7 @@ class AXK1MLAAttention(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.q_proj",
             )
-        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=config.rms_norm_eps)
+        self.kv_a_layernorm = _make_kv_a_layernorm(config, self.kv_lora_rank)
         self.kv_b_proj = ColumnParallelLinear(
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
