@@ -294,6 +294,8 @@ class ModelArchConfigConvertorBase:
             return False
         elif self.hf_text_config.model_type in (
             "axk1",
+            # Remote-code A.X-K1 checkpoints (e.g. A.X-K1-Light)
+            "AXK1",
             "axk2",
             "axk3",
             "deepseek_v2",
