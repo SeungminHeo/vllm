@@ -12,19 +12,31 @@ Format emitted by the model (one ``<tool_call>`` block per call, back to back)::
   everything after that newline up to ``<|/parameter|>``, taken verbatim.
 * String values are written raw (no quotes, no escaping). Every other value
   (number, boolean, null, array, object) is written as JSON.
+* The reserved closing marker ``<|/parameter|>`` cannot occur in a raw value.
 
 So the value of a parameter is decoded with the tool's JSON schema: a
 parameter typed ``string`` keeps the raw text exactly; anything else is parsed
 as JSON. Parameters the schema does not describe are parsed as JSON when that
 yields a non-string, and kept as raw text otherwise.
 
-Arguments are always re-serialised as ``json.dumps(args, ensure_ascii=False)``
+Complete arguments are re-serialised as ``json.dumps(args, ensure_ascii=False)``
 -- in streaming, the concatenation of the argument deltas is exactly that
 string, so the serving layer's end-of-stream flush
 (``get_remaining_unstreamed_args``) stays consistent. String-typed parameters
 are streamed character by character as they are generated (useful for long
 ``content`` arguments); other parameters are emitted once their value is
 complete.
+Content before, between, and after calls is preserved. Truncated calls are
+omitted from non-streaming tool calls; their already streamed arguments stay
+incomplete rather than being repaired into executable JSON.
+
+Generation uses the native tag grammar for auto/required/named calls, with
+parameters in schema declaration order and JSON constraints on non-string
+values. Raw strings support enum, const, pattern, and length constraints;
+combining pattern and length is rejected unless a finite enum/const resolves
+both. For tool_choice="none", tool markers are excluded from content.
+An explicit response format allows either that format or a native call under
+auto, and is preserved as-is under none.
 
 ``<think>...</think>`` is not handled here: pair this with a reasoning parser.
 """
@@ -37,6 +49,21 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from jsonschema import Draft202012Validator
+from xgrammar import StructuralTag
+from xgrammar.structural_tag import (
+    AnyTextFormat,
+    ConstStringFormat,
+    JSONSchemaFormat,
+    OptionalFormat,
+    OrFormat,
+    RegexFormat,
+    SequenceFormat,
+    TagFormat,
+    TagsWithSeparatorFormat,
+    TriggeredTagsFormat,
+)
+
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -45,10 +72,15 @@ from vllm.entrypoints.generate.base.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+)
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import make_tool_call_id
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
@@ -57,7 +89,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
 from vllm.tool_parsers.utils import (
     coerce_to_schema_type,
     extract_types_from_schema,
-    find_tool_properties,
+    get_function_tools,
     partial_tag_overlap,
 )
 
@@ -68,6 +100,139 @@ TOOL_CALL_END = "</tool_call>"
 PARAM_START = "<|parameter|>"
 PARAM_END = "<|/parameter|>"
 _MARKERS = (TOOL_CALL_START, TOOL_CALL_END, PARAM_START, PARAM_END)
+_REASONING_MARKERS = ("<think>", "</think>")
+
+
+def _resolve_property(schema: Any, root: dict[str, Any]) -> Any:
+    seen: set[str] = set()
+    while isinstance(schema, dict) and "$ref" in schema:
+        ref = schema["$ref"]
+        if not isinstance(ref, str) or not ref.startswith("#/") or ref in seen:
+            raise VLLMValidationError(
+                "AXK3 requires resolvable local schema references"
+            )
+        seen.add(ref)
+        target: Any = root
+        try:
+            for key in ref[2:].split("/"):
+                target = target[key.replace("~1", "/").replace("~0", "~")]
+        except (KeyError, TypeError) as exc:
+            raise VLLMValidationError(
+                f"Unresolved AXK3 schema reference: {ref}"
+            ) from exc
+        schema = {**target, **{k: v for k, v in schema.items() if k != "$ref"}}
+    if isinstance(schema, dict):
+        schema = dict(schema)
+        for key in ("$defs", "definitions"):
+            if key in root:
+                schema.setdefault(key, root[key])
+    return schema
+
+
+def _value_format(schema: Any) -> Any:
+    if isinstance(schema, dict) and "$ref" in schema:
+        schema = _resolve_property(schema, schema)
+    types = _schema_types(schema)
+    if isinstance(schema, dict) and ("enum" in schema or "const" in schema):
+        values = schema.get("enum", [schema.get("const")])
+        validator = Draft202012Validator(schema)
+        encodings = [
+            ConstStringFormat(value=v if isinstance(v, str) else _dumps(v))
+            for v in values
+            if validator.is_valid(v) and not (isinstance(v, str) and PARAM_END in v)
+        ]
+        if not encodings:
+            raise VLLMValidationError("AXK3 parameter has no representable enum values")
+        return encodings[0] if len(encodings) == 1 else OrFormat(elements=encodings)
+    if types is None:
+        return AnyTextFormat(excludes=[PARAM_END])
+    if "string" in types and len(types) > 1:
+        for union in ("anyOf", "oneOf"):
+            if union in schema:
+                base = {k: v for k, v in schema.items() if k != union}
+                return OrFormat(
+                    elements=[_value_format({**base, **s}) for s in schema[union]]
+                )
+        branches = []
+        for kind in sorted(types):
+            branch = {**schema, "type": kind}
+            if "enum" in branch:
+                branch["enum"] = [v for v in branch["enum"] if _json_type_ok(v, {kind})]
+            branches.append(_value_format(branch))
+        return OrFormat(elements=branches)
+    if types == {"string"} and any(key in schema for key in ("minLength", "maxLength")):
+        if "pattern" in schema:
+            raise VLLMValidationError(
+                "AXK3 raw strings cannot combine pattern and length constraints"
+            )
+        # xgrammar ignores root string lengths when excludes is set.
+        minimum = schema.get("minLength", 0)
+        maximum = schema.get("maxLength", "")
+        schema = {
+            **{k: v for k, v in schema.items() if k not in ("minLength", "maxLength")},
+            "pattern": rf"^[\s\S]{{{minimum},{maximum}}}$",
+        }
+    # qwen_xml renders a scalar string verbatim, matching K3. Object and
+    # array values must retain the ordinary JSON encoding.
+    return JSONSchemaFormat(
+        json_schema=schema,
+        style="qwen_xml" if types == {"string"} else "json",
+        excludes=[PARAM_END],
+    )
+
+
+def _tool_tag(name: str, parameters: dict[str, Any]) -> TagFormat:
+    # Fix the parameter order to enforce required keys without allowing
+    # duplicates. The extraction paths still accept any order.
+    required = parameters.get("required", [])
+    elements: list[Any] = []
+    for key, schema in parameters.get("properties", {}).items():
+        schema = _resolve_property(schema, parameters)
+        value = _value_format(schema)
+        param = TagFormat(begin=PARAM_START + key + "\n", content=value, end=PARAM_END)
+        elements.append(param if key in required else OptionalFormat(content=param))
+    body = (
+        SequenceFormat(elements=elements) if elements else ConstStringFormat(value="")
+    )
+    return TagFormat(begin=TOOL_CALL_START + name, content=body, end=TOOL_CALL_END)
+
+
+def _tool_choice_tag(
+    request: ChatCompletionRequest | ResponsesRequest,
+) -> StructuralTag:
+    if request.tool_choice == "none":
+        return StructuralTag(
+            format=AnyTextFormat(excludes=list(_MARKERS + _REASONING_MARKERS))
+        )
+    choice = request.tool_choice
+    function = getattr(choice, "function", None)
+    name = getattr(function, "name", None) or getattr(choice, "name", None)
+    tags = []
+    for tool in get_function_tools(request.tools or []):
+        tool_function = (
+            tool.function if isinstance(tool, ChatCompletionToolsParam) else tool
+        )
+        if name is None or tool_function.name == name:
+            tags.append(_tool_tag(tool_function.name, tool_function.parameters or {}))
+    if not tags:
+        raise ValueError("AXK3 tool_choice requires an available function tool")
+    if choice in (None, "auto"):
+        return StructuralTag(
+            format=TriggeredTagsFormat(
+                triggers=[TOOL_CALL_START],
+                tags=tags,
+                stop_after_first=request.parallel_tool_calls is False,
+                excludes=list(_REASONING_MARKERS),
+            )
+        )
+    return StructuralTag(
+        format=TagsWithSeparatorFormat(
+            tags=tags,
+            separator="",
+            at_least_one=True,
+            stop_after_first=name is not None or request.parallel_tool_calls is False,
+        )
+    )
 
 
 # --------------------------------------------------------------------------
@@ -127,16 +292,6 @@ def _parse_call(text: str, start: int, final: bool) -> tuple[_Call, int]:
                 call.params.append(_Param(key, text[value_start:value_end], True))
                 pos = value_end + len(PARAM_END)
                 continue
-            if final:
-                # Tolerate a missing <|/parameter|>: the value then runs to the
-                # next </tool_call>.
-                call_end = text.find(TOOL_CALL_END, value_start)
-                if call_end != -1:
-                    call.params.append(_Param(key, text[value_start:call_end], True))
-                    call.closed = True
-                    return call, call_end + len(TOOL_CALL_END)
-                call.params.append(_Param(key, text[value_start:], False))
-                return call, n
             raw = text[value_start:]
             overlap = partial_tag_overlap(raw, PARAM_END)
             call.params.append(_Param(key, raw[: len(raw) - overlap], False))
@@ -159,20 +314,23 @@ def _parse_call(text: str, start: int, final: bool) -> tuple[_Call, int]:
 
 
 def _scan(text: str, final: bool) -> tuple[str, list[_Call]]:
-    """Split text into (content before the first call, calls). Parsing stops at
-    the first call that is not closed."""
-    first = text.find(TOOL_CALL_START)
-    if first == -1:
-        return text, []
+    """Collect content outside calls, stopping at the first incomplete call."""
+    content: list[str] = []
     calls: list[_Call] = []
-    pos = first
-    while pos != -1:
+    end = 0
+    while True:
+        pos = text.find(TOOL_CALL_START, end)
+        if pos == -1:
+            tail = text[end:]
+            overlap = 0 if final else partial_tag_overlap(tail, TOOL_CALL_START)
+            content.append(tail[: len(tail) - overlap])
+            break
+        content.append(text[end:pos])
         call, end = _parse_call(text, pos + len(TOOL_CALL_START), final)
         calls.append(call)
         if not call.closed:
             break
-        pos = text.find(TOOL_CALL_START, end)
-    return text[:first], calls
+    return "".join(content), calls
 
 
 # --------------------------------------------------------------------------
@@ -195,9 +353,14 @@ def _is_finite(value: Any) -> bool:
 def _schema_types(schema: Any) -> set[str] | None:
     """JSON types a property schema allows, or None when it does not say."""
     if not isinstance(schema, dict) or not any(
-        k in schema for k in ("type", "enum", "anyOf", "oneOf", "allOf")
+        k in schema for k in ("type", "enum", "const", "anyOf", "oneOf", "allOf")
     ):
         return None
+    if "const" in schema:
+        schema = {**schema, "enum": [schema["const"]]}
+    if "type" in schema:
+        kind = schema["type"]
+        return {kind} if isinstance(kind, str) else set(kind)
     return set(extract_types_from_schema(schema))
 
 
@@ -232,7 +395,12 @@ def _decode_value(raw: str, schema: Any, known: bool) -> Any:
 
     if types is None:  # not described by the schema
         return parsed if parsed_ok and not isinstance(parsed, str) else raw
-    if parsed_ok and not isinstance(parsed, str) and _json_type_ok(parsed, types):
+    if (
+        parsed_ok
+        and not isinstance(parsed, str)
+        and _json_type_ok(parsed, types)
+        and ("string" not in types or Draft202012Validator(schema).is_valid(parsed))
+    ):
         return parsed
     if "string" in types:
         return raw
@@ -295,6 +463,8 @@ class AXK3ToolParser(ToolParser):
         self._sent_content_idx = 0
         self._tool_ids: list[str] = []
         self._markers_are_special = self._detect_special_markers()
+        self._current_text = ""
+        self._property_cache: dict[str, dict[str, Any]] = {}
 
     def _detect_special_markers(self) -> bool:
         """True when the markers would be dropped by skip_special_tokens."""
@@ -318,19 +488,68 @@ class AXK3ToolParser(ToolParser):
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
-        # super().adjust_request() is deliberately not called: for
-        # tool_choice="required"/named it installs a JSON schema as a
-        # structured-output constraint, which would force output this format
-        # cannot be.
-        if not request.tools or request.tool_choice == "none":
+        if not request.tools:
+            return request
+        outputs = request.extract_structured_outputs()
+        if request.tool_choice in (None, "auto") and outputs is not None:
+            from vllm.parser.abstract_parser import structured_outputs_to_format
+
+            output_format = structured_outputs_to_format(outputs)
+            if output_format is not None:
+                forced = request.model_copy(update={"tool_choice": "required"})
+                combined: Any = OrFormat(
+                    elements=[output_format, _tool_choice_tag(forced).format]
+                )
+                if isinstance(output_format, JSONSchemaFormat):
+                    combined = SequenceFormat(
+                        elements=[
+                            RegexFormat(pattern=r"[ \t\r\n]*"),
+                            combined,
+                            RegexFormat(pattern=r"[ \t\r\n]*"),
+                        ]
+                    )
+                request.structured_outputs = StructuredOutputsParams(
+                    structural_tag=StructuralTag(format=combined).model_dump_json()
+                )
+                if isinstance(request, ResponsesRequest):
+                    request.text = None
+                else:
+                    request.response_format = None
+        elif request.tool_choice != "none" or outputs is None:
+            # Constrain native K3 tags; the generic JSON tool-call grammar
+            # cannot be parsed by this parser.
+            request.structured_outputs = StructuredOutputsParams(
+                structural_tag=_tool_choice_tag(request).model_dump_json()
+            )
+            if isinstance(request, ResponsesRequest):
+                request.text = None
+            else:
+                request.response_format = None
+        if request.tool_choice == "none":
             return request
         if self._markers_are_special and hasattr(request, "skip_special_tokens"):
             request.skip_special_tokens = False
         return request
 
     def _properties(self, name: str, request: Any) -> dict[str, Any]:
-        tools = getattr(request, "tools", None) or self.tools
-        return find_tool_properties(tools, name) or {}
+        if name not in self._property_cache:
+            tools = getattr(request, "tools", None) or self.tools
+            for tool in get_function_tools(tools or []):
+                function = (
+                    tool.function
+                    if isinstance(tool, ChatCompletionToolsParam)
+                    else tool
+                )
+                if function.name == name:
+                    root = function.parameters or {}
+                    self._property_cache[name] = {
+                        key: _resolve_property(schema, root)
+                        for key, schema in root.get("properties", {}).items()
+                    }
+                    break
+            else:
+                self._property_cache[name] = {}
+        return self._property_cache[name]
 
     # ---- non-streaming ------------------------------------------------------
     def extract_tool_calls(
@@ -355,12 +574,8 @@ class AXK3ToolParser(ToolParser):
                 for call in calls
                 if call.closed and call.name
             ]
-            if not tool_calls:
-                return ExtractedToolCallInformation(
-                    tools_called=False, tool_calls=[], content=model_output
-                )
             return ExtractedToolCallInformation(
-                tools_called=True,
+                tools_called=bool(tool_calls),
                 tool_calls=tool_calls,
                 content=content if content.strip() else None,
             )
@@ -371,15 +586,17 @@ class AXK3ToolParser(ToolParser):
             )
 
     # ---- streaming ----------------------------------------------------------
-    def _content_delta(self, current_text: str) -> str | None:
-        idx = current_text.find(TOOL_CALL_START)
-        if idx == -1:
-            idx = len(current_text) - partial_tag_overlap(current_text, TOOL_CALL_START)
-        if idx > self._sent_content_idx:
-            delta = current_text[self._sent_content_idx : idx]
-            self._sent_content_idx = idx
+    def _content_delta(self, content: str) -> str | None:
+        if len(content) > self._sent_content_idx:
+            delta = content[self._sent_content_idx :]
+            self._sent_content_idx = len(content)
             return delta
         return None
+
+    def finish_streaming(self) -> DeltaMessage | None:
+        content, _ = _scan(self._current_text, final=True)
+        delta = self._content_delta(content)
+        return DeltaMessage(content=delta) if delta else None
 
     def extract_tool_calls_streaming(
         self,
@@ -392,8 +609,9 @@ class AXK3ToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
         try:
-            content = self._content_delta(current_text)
-            _, calls = _scan(current_text, final=False)
+            self._current_text = current_text
+            visible_content, calls = _scan(current_text, final=False)
+            content = self._content_delta(visible_content)
             deltas: list[DeltaToolCall] = []
 
             for i, call in enumerate(calls):
