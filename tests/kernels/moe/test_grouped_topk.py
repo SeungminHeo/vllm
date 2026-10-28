@@ -16,10 +16,14 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.fused_moe.router.bias_free_grouped_topk import (
+    bias_free_grouped_topk,
+)
 from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
     GroupedTopk,
     GroupedTopKRouter,
     fused_grouped_topk,
+    grouped_topk,
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -399,3 +403,54 @@ def test_grouped_topk_single_group_nonfinite_scores(
 
     torch.testing.assert_close(actual_ids, expected_ids)
     torch.testing.assert_close(actual_values, expected_values, atol=2e-5, rtol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+)
+@pytest.mark.parametrize("n_token", [1, 33])
+@pytest.mark.parametrize(
+    "n_expert,topk,num_expert_group,topk_group",
+    [(128, 8, 8, 4), (64, 6, 8, 3), (128, 8, 1, 1)],
+)
+@pytest.mark.parametrize("scoring_func", ["sigmoid", "softmax"])
+@pytest.mark.parametrize("renormalize", [True, False])
+@pytest.mark.parametrize("input_dtype", [torch.bfloat16, torch.float32])
+def test_bias_free_grouped_topk(
+    n_token: int,
+    n_expert: int,
+    topk: int,
+    num_expert_group: int,
+    topk_group: int,
+    scoring_func: str,
+    renormalize: bool,
+    input_dtype: torch.dtype,
+):
+    """Bias-free routing ranks groups by their best score, like the reference."""
+    set_random_seed(0)
+    # Distinct scores even after rounding to bf16, so no ties decide the result.
+    ranks = torch.stack([torch.randperm(n_expert) for _ in range(n_token)])
+    scores = (ranks + 1) / (n_expert + 1)
+    logits = torch.logit(scores) if scoring_func == "sigmoid" else scores.log()
+    logits = logits.to(device="cuda", dtype=input_dtype)
+    kwargs = dict(
+        hidden_states=torch.empty((n_token, 0), dtype=input_dtype, device="cuda"),
+        gating_output=logits,
+        topk=topk,
+        renormalize=renormalize,
+        num_expert_group=num_expert_group,
+        topk_group=topk_group,
+        scoring_func=scoring_func,
+        routed_scaling_factor=2.5,
+    )
+
+    ref_weights, ref_ids = grouped_topk(**kwargs)
+    weights, ids = bias_free_grouped_topk(**kwargs)
+
+    ref_ids, ref_order = ref_ids.sort(dim=-1)
+    ids, order = ids.sort(dim=-1)
+    torch.testing.assert_close(ids, ref_ids, atol=0, rtol=0)
+    atol = 2e-2 if input_dtype == torch.bfloat16 else 1e-5
+    torch.testing.assert_close(
+        weights.gather(1, order), ref_weights.gather(1, ref_order), atol=atol, rtol=0
+    )
