@@ -22,6 +22,10 @@ Example:
 
 
 _TOOL_PARSERS_TO_REGISTER = {
+    "axk3": (
+        "axk3_tool_parser",
+        "AXK3ToolParser",
+    ),
     "dots": (
         "dots_tool_parser",
         "DotsToolParser",

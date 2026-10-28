@@ -20,6 +20,10 @@ Example:
 
 
 _REASONING_PARSERS_TO_REGISTER = {
+    "axk3": (
+        "axk3_reasoning_parser",
+        "AXK3ReasoningParser",
+    ),
     "deepseek_r1": (  # name
         "deepseek_r1_reasoning_parser",  # filename
         "DeepSeekR1ReasoningParser",  # class_name
