@@ -180,7 +180,8 @@ def create_fused_moe_router(
         )
 
         # Degenerating must not change the advertised routing method, which drives
-        # kernel selection. num_expert_group only affects it for biased routing.
+        # kernel selection. num_expert_group only affects it for biased routing
+        # and for unbiased sigmoid routing.
         def advertised_routing_method(groups: int | None) -> RoutingMethodType:
             return get_routing_method_type(
                 scoring_func=scoring_func,
