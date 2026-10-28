@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from functools import partial
 
 import torch
@@ -19,6 +20,10 @@ from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
 from vllm.model_executor.layers.fused_moe.router.base_router import (
     BaseRouter,
     get_moe_padding_mask,
+)
+from vllm.model_executor.layers.fused_moe.router.bias_free_grouped_topk import (
+    bias_free_grouped_topk,
+    can_use_bias_free_grouped_topk,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
@@ -346,6 +351,7 @@ class GroupedTopKRouter(BaseRouter):
         )
 
         # Select grouped_topk implementation
+        grouped_topk_impl: Callable[..., tuple[torch.Tensor, torch.Tensor]]
         if rocm_aiter_ops.is_fused_moe_enabled():
             if not rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
                 assert self.num_fused_shared_experts == 0
@@ -353,6 +359,15 @@ class GroupedTopKRouter(BaseRouter):
                 rocm_aiter_grouped_topk,
                 num_fused_shared_experts=self.num_fused_shared_experts,
             )
+        elif envs.VLLM_USE_FUSED_MOE_GROUPED_TOPK and can_use_bias_free_grouped_topk(
+            router_logits,
+            self.e_score_correction_bias,
+            self.top_k,
+            self.num_expert_group,
+            self.topk_group,
+            self.scoring_func,
+        ):
+            grouped_topk_impl = bias_free_grouped_topk
         else:
             grouped_topk_impl = partial(grouped_topk, is_padding=is_padding)
 
@@ -368,8 +383,12 @@ class GroupedTopKRouter(BaseRouter):
             e_score_correction_bias=self.e_score_correction_bias,
         )
 
-        # AITER retains its existing interface and masking behavior.
-        if rocm_aiter_ops.is_fused_moe_enabled() and is_padding is not None:
+        # AITER and the bias-free Triton kernel retain their interfaces and
+        # mask padded rows afterwards.
+        if is_padding is not None and (
+            rocm_aiter_ops.is_fused_moe_enabled()
+            or grouped_topk_impl is bias_free_grouped_topk
+        ):
             topk_weights = topk_weights.masked_fill(is_padding.unsqueeze(1), 0)
             topk_ids = topk_ids.masked_fill(is_padding.unsqueeze(1), -1)
 
