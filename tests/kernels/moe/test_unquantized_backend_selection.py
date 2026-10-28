@@ -6,7 +6,10 @@ import pytest
 import torch
 
 from tests.kernels.moe.utils import make_dummy_moe_config
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.config import (
+    RoutingMethodType,
+    get_routing_method_type,
+)
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
     backend_to_kernel_cls,
@@ -513,3 +516,44 @@ def test_select_explicit_triton_backend(is_lora_enabled):
 
     assert selected_backend == UnquantizedMoeBackend.TRITON
     assert experts_cls is not None
+
+
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsBase._supports_current_device",
+    return_value=True,
+)
+def test_select_cuda_flashinfer_trtllm_modular_for_grouped_sigmoid(
+    mock_supports_current_device,
+):
+    """Grouped sigmoid routing without a bias (A.X-K1-Light) must be routed by
+    vLLM: the monolithic kernel's unbiased sigmoid routing ignores groups."""
+    routing_method = get_routing_method_type(
+        scoring_func="sigmoid",
+        top_k=8,
+        renormalize=True,
+        num_expert_group=8,
+        has_e_score_bias=False,
+    )
+    assert routing_method == RoutingMethodType.Unspecified
+    with (
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(current_platform, "is_rocm", return_value=False),
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(current_platform, "is_xpu", return_value=False),
+        patch.object(current_platform, "is_tpu", return_value=False),
+        patch.object(current_platform, "is_out_of_tree", return_value=False),
+        patch.object(
+            current_platform, "is_device_capability_family", return_value=False
+        ),
+    ):
+        moe_config = make_dummy_moe_config(num_experts=4)
+        moe_config.moe_backend = "flashinfer_trtllm"
+        moe_config.routing_method = routing_method
+
+        selected_backend, experts_cls = select_unquantized_moe_backend(
+            moe_config=moe_config
+        )
+
+        assert selected_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
+        assert experts_cls is not None
+        assert experts_cls.__name__ == "TrtLlmBf16ExpertsModular"
