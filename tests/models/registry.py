@@ -204,6 +204,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "ApertusForCausalLM": _HfExamplesInfo("swiss-ai/Apertus-8B-Instruct-2509"),
     "ArceeForCausalLM": _HfExamplesInfo("arcee-ai/AFM-4.5B-Base"),
     "AXK1ForCausalLM": _HfExamplesInfo("skt/A.X-K1", trust_remote_code=True),
+    "AXK1LightForCausalLM": _HfExamplesInfo(
+        "skt/A.X-K1-Light",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "AXK2ForCausalLM": _HfExamplesInfo("skt/A.X-K2"),
     "AXK3ForCausalLM": _HfExamplesInfo("skt/A.X-K3-Flash", is_available_online=False),
     "BailingMoeForCausalLM": _HfExamplesInfo(

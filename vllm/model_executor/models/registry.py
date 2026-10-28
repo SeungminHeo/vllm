@@ -74,6 +74,7 @@ _TEXT_GENERATION_MODELS = {
     "AliceAIForCausalLM": ("alice_ai", "AliceAIForCausalLM"),
     "ApertusForCausalLM": ("apertus", "ApertusForCausalLM"),
     "AXK1ForCausalLM": ("AXK1", "AXK1ForCausalLM"),
+    "AXK1LightForCausalLM": ("axk1_light", "AXK1LightForCausalLM"),
     "AXK2ForCausalLM": ("vllm.models.axk2", "AXK2ForCausalLM"),
     "AXK3ForCausalLM": ("vllm.models.axk3", "AXK3ForCausalLM"),
     "BailingMoeForCausalLM": ("bailing_moe", "BailingMoeForCausalLM"),
