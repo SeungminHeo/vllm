@@ -1247,6 +1247,8 @@ class DeepseekV2MLAAttention(nn.Module):
 
 
 class DeepseekV2DecoderLayer(nn.Module):
+    moe_cls: type[DeepseekV2MoE] = DeepseekV2MoE
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1327,7 +1329,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         )
 
         if is_moe_layer:
-            self.mlp = DeepseekV2MoE(
+            self.mlp = self.moe_cls(
                 config=config,
                 parallel_config=parallel_config,
                 quant_config=quant_config,
@@ -1426,6 +1428,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 @support_torch_compile
 class DeepseekV2Model(nn.Module):
     fall_back_to_pt_during_load = False
+    decoder_layer_cls: type[DeepseekV2DecoderLayer] = DeepseekV2DecoderLayer
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1467,7 +1470,7 @@ class DeepseekV2Model(nn.Module):
             self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: DeepseekV2DecoderLayer(
+            lambda prefix: self.decoder_layer_cls(
                 vllm_config=vllm_config,
                 prefix=prefix,
                 topk_indices_buffer=topk_indices_buffer,
