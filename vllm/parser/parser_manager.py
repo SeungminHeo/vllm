@@ -218,6 +218,19 @@ class ParserManager:
 
             return _ResponseTemplateParser
 
+        if tool_parser_name == "axk3" or reasoning_parser_name == "axk3":
+            from vllm.parser.axk3 import AXK3Parser
+
+            r_cls = reasoning_parser_cls
+            t_cls = tool_parser_cls
+
+            class _AXK3Parser(AXK3Parser):
+                reasoning_parser_cls = r_cls
+                tool_parser_cls = t_cls
+                tool_strict_level = strict_level
+
+            return _AXK3Parser
+
         if reasoning_parser_name == "kimi_k3" or tool_parser_name == "kimi_k3":
             from vllm.parser.kimi_k3 import KimiK3Parser
 
