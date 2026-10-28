@@ -138,12 +138,15 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
+        # Without all2all the monolithic kernel is preferred; this one serves
+        # routing methods it does not support (vLLM routes, e.g. grouped sigmoid).
         return (
-            moe_parallel_config.use_all2all_kernels
-            and not moe_parallel_config.use_ag_rs_all2all_kernels
-            and not moe_parallel_config.use_deepep_ht_kernels
-            and not moe_parallel_config.enable_eplb
-        )
+            not moe_parallel_config.use_all2all_kernels
+            or (
+                not moe_parallel_config.use_ag_rs_all2all_kernels
+                and not moe_parallel_config.use_deepep_ht_kernels
+            )
+        ) and not moe_parallel_config.enable_eplb
 
     def moe_problem_size(
         self,

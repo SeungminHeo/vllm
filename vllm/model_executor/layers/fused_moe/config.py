@@ -158,6 +158,9 @@ def get_routing_method_type(
             return RoutingMethodType.Unspecified
 
     if scoring_func == "sigmoid":
+        # The unbiased sigmoid kernels (routingCustom) do not limit groups.
+        if (num_expert_group or 0) > 1:
+            return RoutingMethodType.Unspecified
         if renormalize:
             return RoutingMethodType.SigmoidRenorm
         return RoutingMethodType.Sigmoid
