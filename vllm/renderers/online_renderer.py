@@ -456,6 +456,7 @@ class OnlineRenderer:
                 parser.reasoning_parser_cls is not None
                 or tool_choice != "none"
                 or is_mistral_grammar_eligible
+                or getattr(parser, "always_adjust_request", False)
             )
             if should_adjust_request:
                 if not isinstance(request, ChatCompletionRequest | ResponsesRequest):

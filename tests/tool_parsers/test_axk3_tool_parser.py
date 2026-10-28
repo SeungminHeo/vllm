@@ -7,12 +7,14 @@ import random
 from unittest.mock import MagicMock
 
 import pytest
+from xgrammar import Grammar
+from xgrammar.testing import _is_grammar_accept_string
 
 from tests.tool_parsers.utils import run_tool_extraction
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
-    ChatCompletionToolsParam,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.tool_parsers.axk3_tool_parser import AXK3ToolParser
 
 TOOLS = [
@@ -58,7 +60,7 @@ def _request(tool_choice="auto"):
     return ChatCompletionRequest(
         messages=[],
         model="test-model",
-        tools=[ChatCompletionToolsParam(type="function", function=t) for t in TOOLS],
+        tools=[{"type": "function", "function": t} for t in TOOLS],
         tool_choice=tool_choice,
     )
 
@@ -84,6 +86,9 @@ def _both(parser_factory, text, request):
         s_content, s_calls = run_tool_extraction(
             p, chunks, request, streaming=True, assert_one_tool_per_delta=False
         )
+        tail = p.finish_streaming()
+        if tail:
+            s_content = (s_content or "") + (tail.content or "")
         assert p.get_remaining_unstreamed_args() == ""
         assert [c.function.name for c in s_calls] == [c.function.name for c in calls]
         # byte-identical argument strings, not merely equal JSON
@@ -185,7 +190,7 @@ def test_content_before_and_multiple_calls():
         + _call("ping")
     )
     content, calls = _both(lambda: AXK3ToolParser(MagicMock()), text, _request())
-    assert content == "파일을 저장할게요.\n"
+    assert content == "파일을 저장할게요.\n\n"
     assert [c.function.name for c in calls] == ["write_file", "ping"]
     assert json.loads(calls[1].function.arguments) == {}
 
@@ -193,13 +198,13 @@ def test_content_before_and_multiple_calls():
 def test_unclosed_call_is_not_a_tool_call(parser):
     text = "<tool_call>write_file<|parameter|>path\na.py<|/parameter|>"
     content, calls = run_tool_extraction(parser, text, _request())
-    assert calls == [] and content == text
+    assert calls == [] and content is None
 
 
-def test_missing_parameter_end_is_tolerated_in_final_parse(parser):
+def test_missing_parameter_end_does_not_complete_a_call(parser):
     text = "<tool_call>write_file<|parameter|>path\na.py</tool_call>"
-    _, calls = run_tool_extraction(parser, text, _request())
-    assert json.loads(calls[0].function.arguments) == {"path": "a.py"}
+    content, calls = run_tool_extraction(parser, text, _request())
+    assert calls == [] and content is None
 
 
 def test_bool_fallback_for_non_json_literal(parser):
@@ -274,3 +279,182 @@ def test_adjust_request_leaves_plain_text_markers_alone():
     tok.all_special_tokens = ["<|im_end|>"]
     p = AXK3ToolParser(tok)
     assert p.adjust_request(_request()).skip_special_tokens is True
+
+
+def _grammar(parser, request):
+    adjusted = parser.adjust_request(request)
+    return Grammar.from_structural_tag(adjusted.structured_outputs.structural_tag)
+
+
+def test_required_forces_a_native_call(parser):
+    grammar = _grammar(parser, _request("required"))
+    assert _is_grammar_accept_string(grammar, _call("ping"))
+    assert _is_grammar_accept_string(grammar, _call("ping") * 2)
+    assert not _is_grammar_accept_string(grammar, "No tool needed.")
+    assert not _is_grammar_accept_string(grammar, "")
+
+
+def test_named_choice_allows_only_the_selected_function(parser):
+    req = _request({"type": "function", "function": {"name": "ping"}})
+    grammar = _grammar(parser, req)
+    assert _is_grammar_accept_string(grammar, _call("ping"))
+    assert not _is_grammar_accept_string(grammar, _call("typed"))
+    assert not _is_grammar_accept_string(grammar, _call("ping") * 2)
+
+
+def test_required_respects_parallel_tool_calls_false(parser):
+    req = _request("required")
+    req.parallel_tool_calls = False
+    grammar = _grammar(parser, req)
+    assert _is_grammar_accept_string(grammar, _call("ping"))
+    assert not _is_grammar_accept_string(grammar, _call("ping") * 2)
+
+
+def test_none_prevents_native_tool_tags_in_content(parser):
+    grammar = _grammar(parser, _request("none"))
+    assert _is_grammar_accept_string(grammar, "No tool needed.")
+    assert not _is_grammar_accept_string(grammar, _call("ping"))
+    assert not _is_grammar_accept_string(grammar, "Answer " + _call("ping"))
+    assert not _is_grammar_accept_string(grammar, "Answer </think> repeated")
+
+
+@pytest.mark.parametrize("tool_choice", ["auto", "required"])
+def test_tool_choice_enforces_parameter_keys_and_nested_json(parser, tool_choice):
+    grammar = _grammar(parser, _request(tool_choice))
+    params = (("path", "a.txt"), ("content", 'a "quote"\nnext line'))
+    valid = _call("write_file", *params, ("options", '{"overwrite": true}'))
+    assert _is_grammar_accept_string(grammar, valid)
+    assert not _is_grammar_accept_string(
+        grammar, _call("write_file", *params, ("overwrite", "true"))
+    )
+    assert not _is_grammar_accept_string(
+        grammar, _call("write_file", *params, ("options", "not json"))
+    )
+    assert not _is_grammar_accept_string(
+        grammar, _call("write_file", ("path", "a.txt"))
+    )
+
+
+def test_auto_allows_plain_content_and_parallel_calls(parser):
+    grammar = _grammar(parser, _request())
+    assert _is_grammar_accept_string(grammar, "No tool needed.")
+    assert _is_grammar_accept_string(grammar, "Checking. " + _call("ping") * 2)
+
+
+def test_none_preserves_an_explicit_response_format(parser):
+    data = _request("none").model_dump()
+    data["response_format"] = {"type": "json_object"}
+    req = ChatCompletionRequest.model_validate(data)
+    parser.adjust_request(req)
+    assert req.response_format.type == "json_object"
+    assert req.structured_outputs is None
+
+
+def test_content_between_and_after_calls_is_preserved():
+    text = "먼저 " + _call("ping") + " 중간 " + _call("ping") + " 끝."
+    content, calls = _both(lambda: AXK3ToolParser(MagicMock()), text, _request())
+    assert content == "먼저  중간  끝."
+    assert len({c.id for c in calls}) == 2
+
+
+def test_auto_response_format_allows_json_or_native_tool_calls(parser):
+    data = _request().model_dump()
+    data["response_format"] = {"type": "json_object"}
+    req = ChatCompletionRequest.model_validate(data)
+    grammar = _grammar(parser, req)
+    assert _is_grammar_accept_string(grammar, '{"answer": "hello"}')
+    assert _is_grammar_accept_string(grammar, '\n\n{"answer": "hello"}\n')
+    assert _is_grammar_accept_string(grammar, _call("ping"))
+    assert not _is_grammar_accept_string(grammar, "unstructured answer")
+
+
+@pytest.mark.parametrize(
+    "schema, valid, invalid",
+    [
+        ({"type": "string", "enum": ["yes", "no"]}, "yes", "maybe"),
+        ({"type": "string", "const": "007"}, "007", "7"),
+        ({"type": "string", "pattern": "^[A-Z]{2}$"}, "AB", "abc"),
+        ({"type": "string", "minLength": 2, "maxLength": 3}, "abc", "abcd"),
+        ({"type": ["string", "null"], "enum": ["yes", None]}, "null", "maybe"),
+        (
+            {"anyOf": [{"type": "string", "enum": ["yes"]}, {"type": "integer"}]},
+            "7",
+            "maybe",
+        ),
+    ],
+)
+def test_scalar_value_constraints_use_the_native_encoding(
+    parser, schema, valid, invalid
+):
+    data = _request("required").model_dump()
+    data["tools"] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "typed",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"x": schema},
+                    "required": ["x"],
+                },
+            },
+        }
+    ]
+    req = ChatCompletionRequest.model_validate(data)
+    grammar = _grammar(parser, req)
+    assert _is_grammar_accept_string(grammar, _call("typed", ("x", valid)))
+    assert not _is_grammar_accept_string(grammar, _call("typed", ("x", invalid)))
+
+
+def test_local_refs_preserve_raw_strings_and_validate_nested_objects(parser):
+    data = _request("required").model_dump()
+    data["tools"] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "typed",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "s": {"$ref": "#/$defs/Code"},
+                        "obj": {"$ref": "#/$defs/Options"},
+                    },
+                    "required": ["s", "obj"],
+                    "$defs": {
+                        "Code": {"type": "string", "enum": ["007"]},
+                        "Options": {
+                            "type": "object",
+                            "properties": {
+                                "cc": {"type": "array", "items": {"type": "string"}}
+                            },
+                            "required": ["cc"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+            },
+        }
+    ]
+    req = ChatCompletionRequest.model_validate(data)
+    text = _call("typed", ("s", "007"), ("obj", '{"cc": ["a", "b"]}'))
+    grammar = _grammar(parser, req)
+    assert _is_grammar_accept_string(grammar, text)
+    assert not _is_grammar_accept_string(
+        grammar, _call("typed", ("s", "007"), ("obj", '{"cc": true}'))
+    )
+    _, calls = _both(lambda: AXK3ToolParser(MagicMock()), text, req)
+    assert json.loads(calls[0].function.arguments) == {
+        "s": "007",
+        "obj": {"cc": ["a", "b"]},
+    }
+
+
+def test_pattern_and_length_cannot_be_silently_ignored(parser):
+    req = _request()
+    req.tools[0].function.parameters["properties"]["path"] = {
+        "type": "string",
+        "pattern": "^[a-z]+$",
+        "maxLength": 3,
+    }
+    with pytest.raises(VLLMValidationError, match="pattern and length"):
+        parser.adjust_request(req)

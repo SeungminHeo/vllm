@@ -1,19 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the A.X K3 (axk3) reasoning parser.
-
-The K3 generation prompt ends with ``<think>``, so model output starts inside
-the think block. The split must equal the K3 grammar ``split`` (the RL harness
-function). A character-level stub stands in for the K3 tokenizer (no
-model files, no network).
-"""
+import json
+import os
 
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.parser.parser_manager import ParserManager
 from vllm.reasoning import ReasoningParserManager
-from vllm.reasoning import axk3_reasoning_parser as axk3_module
 from vllm.reasoning.axk3_reasoning_parser import AXK3ReasoningParser
+from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
+from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 
 TOKEN_IDS = {
     "<|endoftext|>": 163691,
@@ -111,13 +108,13 @@ SPLIT_CASES = [
     ("Reasoning</think>", "Reasoning", None),
     ("</think>content", "", "content"),
     ("multi\nline</think>rest\nthat", "multi\nline", "rest\nthat"),
-    # a generated <think> is kept verbatim
-    ("<think>R</think>C", "<think>R", "C"),
+    # Match DeepSeek-R1 when an opening tag is generated.
+    ("<think>R</think>C", "R", "C"),
     # only the first </think> splits
     ("R</think>A</think>B", "R", "A</think>B"),
-    # implicit end: no </think>, content starts at <tool_call>
-    ("thinking" + CALL, "thinking", CALL),
-    (CALL, None, CALL),
+    # A tool tag cannot end reasoning without </think>.
+    ("thinking" + CALL, "thinking" + CALL, None),
+    (CALL, CALL, None),
     # a call inside the reasoning stays reasoning
     ("x" + CALL + "y</think>final", "x" + CALL + "y", "final"),
     # unclosed think: everything is reasoning
@@ -133,7 +130,8 @@ def test_registered_in_tree():
 @pytest.mark.parametrize("output, reasoning, content", SPLIT_CASES)
 def test_extract_reasoning(parser, output, reasoning, content):
     assert parser.extract_reasoning(output, make_request()) == (reasoning, content)
-    assert axk3_module._split(output) == (reasoning, content)
+    reference = DeepSeekR1ReasoningParser(parser.model_tokenizer)
+    assert reference.extract_reasoning(output, make_request()) == (reasoning, content)
 
 
 @pytest.mark.parametrize(
@@ -142,21 +140,9 @@ def test_extract_reasoning(parser, output, reasoning, content):
 )
 def test_streaming_matches_split(parser, output, reasoning, content):
     pieces = parser.model_tokenizer.tokenize(output)
-    assert stream(parser, pieces, IM_END_ID) == (reasoning or "", content or "")
-
-
-def test_streaming_end_tag_split_into_text_pieces(parser):
-    got = stream(parser, ["Reason", "</th", "ink", ">", "Content"])
-    assert got == ("Reason", "Content")
-    assert parser.is_reasoning_end_streaming([], [])
-
-
-def test_streaming_holds_partial_end_tag_until_terminal(k3_tokenizer):
-    pieces = list("still thinking </th")
-    got = stream(AXK3ReasoningParser(k3_tokenizer), pieces)
-    assert got == ("still thinking ", "")
-    got = stream(AXK3ReasoningParser(k3_tokenizer), pieces, IM_END_ID)
-    assert got == ("still thinking </th", "")
+    # DeepSeek-R1 suppresses standalone think tokens, including a repeated end.
+    expected_content = (content or "").replace("</think>", "")
+    assert stream(parser, pieces, IM_END_ID) == (reasoning or "", expected_content)
 
 
 def test_streaming_implicit_end_is_not_detected(parser):
@@ -181,12 +167,6 @@ def test_extract_content_ids(parser):
     assert parser.extract_content_ids([5, 6]) == []
 
 
-def test_count_reasoning_tokens(parser):
-    assert parser.count_reasoning_tokens([5, 6, THINK_END_ID, 7]) == 2
-    assert parser.count_reasoning_tokens([5, TOOL_CALL_START_ID, 7]) == 1
-    assert parser.count_reasoning_tokens([5, 6, 7]) == 3
-
-
 def test_tags(parser):
     assert parser.reasoning_start_str == "<think>"
     assert parser.reasoning_end_str == "</think>"
@@ -194,13 +174,291 @@ def test_tags(parser):
 
 def test_adjust_request_keeps_special_tokens(parser):
     request = make_request()
-    assert request.skip_special_tokens
     assert parser.adjust_request(request).skip_special_tokens is False
 
 
-def test_rejects_a_non_k3_tokenizer(monkeypatch):
-    monkeypatch.setattr(axk3_module, "_TOKENIZER_OK", {})
-    wrong = dict(TOKEN_IDS)
-    wrong["</think>"] = 7
-    with pytest.raises(RuntimeError, match="not the K3 tokenizer"):
-        AXK3ReasoningParser(K3StubTokenizer(wrong))
+def test_token_ids_come_from_tokenizer():
+    tokens = dict(TOKEN_IDS)
+    tokens["</think>"] = 7
+    parser = AXK3ReasoningParser(K3StubTokenizer(tokens))
+    assert parser.is_reasoning_end([5, 7])
+    assert parser.is_reasoning_end_streaming([5, 7], [7])
+    assert parser.extract_content_ids([5, 7, 6]) == [6]
+
+
+@pytest.mark.parametrize(
+    "ids, expected",
+    [
+        ([5, 6, THINK_END_ID, 7], 2),
+        ([THINK_START_ID, 5, 6, THINK_END_ID, 7], 2),
+        ([THINK_END_ID, 7], 0),
+        ([5, 6], 2),
+        ([], 0),
+        ([5, THINK_END_ID, THINK_START_ID, 6], 1),
+    ],
+)
+def test_generated_reasoning_is_counted_with_an_implicit_opening_tag(
+    parser, ids, expected
+):
+    assert parser.count_reasoning_tokens(ids) == expected
+
+
+@pytest.mark.parametrize("tool_choice", ["auto", "required"])
+def test_composed_parser_separates_reasoning_from_tool_calls(k3_tokenizer, tool_choice):
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ],
+        tool_choice=tool_choice,
+    )
+    parser_cls = ParserManager.get_parser("axk3", "axk3", enable_auto_tools=True)
+    assert parser_cls is not None
+    parser = parser_cls(k3_tokenizer, request.tools)
+    parser.adjust_request(request)
+    assert not request.skip_special_tokens
+    assert request.structured_outputs is not None
+    assert request.structured_outputs.structural_tag
+    output = "Check the weather.</think>" + CALL
+    reasoning, content, calls = parser.parse(output, request, enable_auto_tools=True)
+    assert reasoning == "Check the weather."
+    assert content is None
+    assert calls is not None
+    assert len(calls) == 1
+    assert calls[0].name == "get_weather"
+    assert calls[0].arguments == '{"city": "Tokyo"}'
+
+    streaming = parser_cls(k3_tokenizer, request.tools)
+    pieces = k3_tokenizer.tokenize(output)
+    deltas = [
+        streaming.parse_delta(
+            piece,
+            k3_tokenizer.ids(piece),
+            request,
+            prompt_token_ids=[THINK_START_ID],
+            finished=i == len(pieces) - 1,
+        )
+        for i, piece in enumerate(pieces)
+    ]
+    assert "".join(d.reasoning or "" for d in deltas if d) == reasoning
+    assert "".join(d.content or "" for d in deltas if d) == ""
+    arguments = []
+    for delta in deltas:
+        if delta:
+            for call in delta.tool_calls:
+                assert call.function is not None
+                arguments.append(call.function.arguments or "")
+    assert "".join(arguments) == calls[0].arguments
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [" plain <", " plain <tool_", "<tool_call>ping"]
+    + [CALL[:i] for i in range(1, len(CALL))],
+)
+def test_composed_parser_flushes_content_without_completing_truncated_calls(
+    k3_tokenizer, tail
+):
+    parser_cls = ParserManager.get_parser("axk3", "axk3", enable_auto_tools=True)
+    assert parser_cls is not None
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        tools=[{"type": "function", "function": {"name": "get_weather"}}],
+    )
+    parser = parser_cls(k3_tokenizer, request.tools)
+    expected = tail if "<tool_call>" not in tail else None
+    assert parser.parse("R</think>" + tail, request, enable_auto_tools=True) == (
+        "R",
+        expected,
+        [],
+    )
+    deltas = []
+    for piece in k3_tokenizer.tokenize("R</think>" + tail):
+        deltas.append(
+            parser.parse_delta(
+                piece,
+                k3_tokenizer.ids(piece),
+                request,
+                prompt_token_ids=[THINK_START_ID],
+                finished=False,
+            )
+        )
+    deltas.append(parser.parse_delta("", [], request, finished=True))
+    assert "".join(d.content or "" for d in deltas if d) == (expected or "")
+    args = "".join(
+        tc.function.arguments or ""
+        for d in deltas
+        if d
+        for tc in d.tool_calls
+        if tc.function
+    )
+    if args:
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(args)
+    assert parser.parse_delta("", [], request, finished=True) is None
+
+
+@pytest.fixture(params=["byte_bpe", "checkpoint"])
+def hf_k3_tokenizer(request):
+    from transformers import TokenizersBackend
+
+    if request.param == "checkpoint":
+        path = os.environ.get("AXK3_TOKENIZER")
+        if not path:
+            pytest.skip("Set AXK3_TOKENIZER to a local AX-K3 tokenizer checkpoint")
+        return TokenizersBackend.from_pretrained(path, local_files_only=True)
+    from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
+
+    raw = Tokenizer(models.BPE())
+    raw.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    raw.decoder = decoders.ByteLevel()
+    raw.train_from_iterator(
+        ["weather Tokyo hello before after"],
+        trainers.BpeTrainer(
+            vocab_size=280,
+            initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
+            special_tokens=list(TOKEN_IDS),
+        ),
+    )
+    return TokenizersBackend(
+        tokenizer_object=raw,
+        eos_token="<|im_end|>",
+        additional_special_tokens=list(TOKEN_IDS),
+    )
+
+
+def test_token_ids_match_grammar_and_incremental_detokenization(hf_k3_tokenizer):
+    from xgrammar import GrammarCompiler, GrammarMatcher, TokenizerInfo
+
+    tok = hf_k3_tokenizer
+    parser_cls = ParserManager.get_parser("axk3", "axk3", enable_auto_tools=True)
+    assert parser_cls is not None
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ],
+    )
+    parser_cls(tok, request.tools).adjust_request(request)
+    city = '서울 😀 "quote"\nnext'
+    native = "before" + CALL.replace("Tokyo", city) + "after"
+    assert request.structured_outputs is not None
+    grammar = GrammarCompiler(
+        TokenizerInfo.from_huggingface(tok)
+    ).compile_structural_tag(request.structured_outputs.structural_tag)
+    matcher = GrammarMatcher(grammar)
+    for token_id in tok.encode(native, add_special_tokens=False):
+        assert matcher.accept_token(token_id)
+    assert matcher.accept_token(tok.eos_token_id)
+    output = "Reasoning</think>" + native
+    ids = tok.encode(output, add_special_tokens=False)
+    for batch_size in (1, 7, len(ids)):
+        parser = parser_cls(tok, request.tools)
+        tokens, prefix, read = None, 0, 0
+        pending_text, pending_ids, deltas = "", [], []
+        for i, token_id in enumerate(ids):
+            new, text, prefix, read = detokenize_incrementally(
+                tok,
+                ids[: i + 1],
+                tokens,
+                prefix,
+                read,
+                skip_special_tokens=False,
+                spaces_between_special_tokens=False,
+            )
+            tokens = (tokens or []) + new
+            pending_text += text
+            pending_ids.append(token_id)
+            if len(pending_ids) == batch_size or i == len(ids) - 1:
+                deltas.append(
+                    parser.parse_delta(
+                        pending_text,
+                        pending_ids,
+                        request,
+                        prompt_token_ids=[tok.convert_tokens_to_ids("<think>")],
+                        finished=False,
+                    )
+                )
+                pending_text, pending_ids = "", []
+        deltas.append(parser.parse_delta("", [], request, finished=True))
+        assert "".join(d.reasoning or "" for d in deltas if d) == "Reasoning"
+        assert "".join(d.content or "" for d in deltas if d) == "beforeafter"
+        calls = [tc for d in deltas if d for tc in d.tool_calls]
+        assert len([tc.id for tc in calls if tc.id]) == 1
+        assert all(tc.index == 0 for tc in calls)
+        assert json.loads(
+            "".join(tc.function.arguments or "" for tc in calls if tc.function)
+        ) == {"city": city}
+
+
+@pytest.mark.parametrize("mode", ["required", "none", "json"])
+def test_hidden_reasoning_grammar_allows_thinking_before_constrained_output(
+    k3_tokenizer, mode
+):
+    """Hiding reasoning must not constrain its tokens with the answer grammar."""
+    from xgrammar import Grammar
+    from xgrammar.testing import _is_grammar_accept_string
+
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        include_reasoning=False,
+        tool_choice=mode if mode != "json" else "none",
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ]
+        if mode != "json"
+        else None,
+        response_format={"type": "json_object"} if mode == "json" else None,
+    )
+    cls = ParserManager.get_parser(
+        tool_parser_name="axk3" if mode != "json" else None,
+        reasoning_parser_name="axk3",
+        enable_auto_tools=True,
+    )
+    assert cls is not None
+    cls(k3_tokenizer, request.tools).adjust_request(request)
+    assert request.structured_outputs is not None
+    grammar = Grammar.from_structural_tag(request.structured_outputs.structural_tag)
+    answer = CALL if mode == "required" else '{"answer": 2}'
+    assert _is_grammar_accept_string(grammar, "Think first.</think>" + answer)
+    assert not _is_grammar_accept_string(grammar, answer)
+    if mode == "required":
+        assert not _is_grammar_accept_string(grammar, "Think.</think>plain answer")
+    elif mode == "none":
+        assert not _is_grammar_accept_string(grammar, "Think.</think>" + CALL)
+    else:
+        assert not _is_grammar_accept_string(grammar, "Think.</think>not JSON")
