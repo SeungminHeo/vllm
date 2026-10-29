@@ -7,9 +7,7 @@ from typing import Any
 
 import regex as re
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -17,6 +15,8 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.utils import (
@@ -31,8 +31,7 @@ _STRING_SCHEMA_TYPES = frozenset({"string", "str", "text", "varchar", "char", "e
 
 
 class SolarOpen2ToolParser(ToolParser):
-    """
-    Tool call parser for Solar Open2 model.
+    """Tool call parser for Solar Open2 model.
 
     Parses the format:
         <|tool_call:start|>{function_name}

@@ -71,7 +71,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -89,6 +89,7 @@ from vllm.third_party.flash_linear_attention.ops.kda import (
     chunk_kda_with_fused_gate,
     fused_kda_gate,
     fused_recurrent_kda,
+    fused_recurrent_kda_fwd,
 )
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.triton_utils.allocation import set_triton_allocator
@@ -96,9 +97,11 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from .interfaces import (
+    EagleModelMixin,
     HasInnerState,
     IsHybrid,
     MixtureOfExperts,
+    SupportsEagle3,
     SupportsPP,
 )
 from .utils import (
@@ -314,6 +317,7 @@ class SolarOpen2MoE(nn.Module):
                 "checkpoint with `routed_scaling_factor=1.0`."
             )
 
+        self.shared_experts: SolarOpen2MLP | None
         if config.n_shared_experts is not None:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
             self.shared_experts = SolarOpen2MLP(
@@ -422,6 +426,7 @@ class SolarOpen2Attention(nn.Module):
         )
 
         self.use_rope = getattr(config, "use_rope", False)
+        self.rotary_emb: RotaryEmbedding | None
         if self.use_rope:
             self.rotary_emb = get_rope(
                 self.head_dim,
@@ -521,11 +526,6 @@ class SolarOpen2KimiDeltaAttention(GatedDeltaNetAttention):
         prefix: str = "",
     ) -> None:
         super().__init__(config, vllm_config, prefix)
-        if self.num_spec > 0:
-            raise NotImplementedError(
-                "Solar Open2's KDA layer implements only the non-speculative "
-                "prefill/decode paths; run without --speculative-config."
-            )
         # FLA triton kernels (chunk_kda, solve_tril) need a PyTorch-backed
         # allocator for scratch memory required by triton >= 3.x autotuner.
         set_triton_allocator(current_platform.current_device())
@@ -866,120 +866,237 @@ class SolarOpen2KimiDeltaAttention(GatedDeltaNetAttention):
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
 
-        if attn_metadata_raw is None:
+        attn_metadata_narrowed = None
+        if isinstance(attn_metadata_raw, dict):
+            attn_metadata_narrowed = attn_metadata_raw.get(self.prefix)
+        if attn_metadata_narrowed is None:
+            # Profile and warmup dummy runs build no metadata for mamba-family
+            # layers (the V2 runner skips their kv-cache groups entirely).
             self._warmup_prefill_kernels(q_proj_states)
             return
 
-        assert isinstance(attn_metadata_raw, dict)
-        attn_metadata_narrowed = attn_metadata_raw[self.prefix]
         assert isinstance(attn_metadata_narrowed, GDNAttentionMetadata)
-        has_initial_state = attn_metadata_narrowed.has_initial_state
-        non_spec_query_start_loc = attn_metadata_narrowed.non_spec_query_start_loc
-        non_spec_state_indices_tensor = (
-            attn_metadata_narrowed.non_spec_state_indices_tensor
-        )
-        num_actual_tokens = attn_metadata_narrowed.num_actual_tokens
-        constant_caches = self.kv_cache
+        m = attn_metadata_narrowed
+        num_actual_tokens = m.num_actual_tokens
+        spec_sequence_masks = m.spec_sequence_masks
+        spec_token_indx = m.spec_token_indx
+        non_spec_token_indx = m.non_spec_token_indx
 
-        q_proj_states = q_proj_states[:num_actual_tokens]
-        k_proj_states = k_proj_states[:num_actual_tokens]
-        v_proj_states = v_proj_states[:num_actual_tokens]
+        qkv = (
+            q_proj_states[:num_actual_tokens],
+            k_proj_states[:num_actual_tokens],
+            v_proj_states[:num_actual_tokens],
+        )
         g1 = g1[:, :num_actual_tokens]
         beta = beta[:, :num_actual_tokens]
 
-        (conv_state, recurrent_state) = constant_caches
+        conv_state, recurrent_state = self.kv_cache
         # conv_state must be (..., dim, width-1) for the conv kernels.
         # DS layout stores it that way directly; SD layout needs a transpose.
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
+        conv_states = conv_state.chunk(3, dim=-2)
+        conv_layers = (self.q_conv1d, self.k_conv1d, self.v_conv1d)
+        conv_weights = tuple(
+            conv.weight.view(conv.weight.size(0), conv.weight.size(2))
+            for conv in conv_layers
+        )
+        conv_biases = tuple(conv.bias for conv in conv_layers)
 
-        conv_state_q, conv_state_k, conv_state_v = conv_state.chunk(3, dim=-2)
-
-        q_conv_weights = self.q_conv1d.weight.view(
-            self.q_conv1d.weight.size(0), self.q_conv1d.weight.size(2)
-        )
-        k_conv_weights = self.k_conv1d.weight.view(
-            self.k_conv1d.weight.size(0), self.k_conv1d.weight.size(2)
-        )
-        v_conv_weights = self.v_conv1d.weight.view(
-            self.v_conv1d.weight.size(0), self.v_conv1d.weight.size(2)
-        )
-        if attn_metadata_narrowed.num_prefills > 0:
-            q_proj_states = q_proj_states.transpose(0, 1)
-            k_proj_states = k_proj_states.transpose(0, 1)
-            v_proj_states = v_proj_states.transpose(0, 1)
-            q = causal_conv1d_fn(
-                q_proj_states,
-                q_conv_weights,
-                self.q_conv1d.bias,
-                activation="silu",
-                conv_states=conv_state_q,
-                has_initial_state=has_initial_state,
-                cache_indices=non_spec_state_indices_tensor,
-                query_start_loc=non_spec_query_start_loc,
-                metadata=attn_metadata_narrowed,
-            ).transpose(0, 1)
-            k = causal_conv1d_fn(
-                k_proj_states,
-                k_conv_weights,
-                self.k_conv1d.bias,
-                activation="silu",
-                conv_states=conv_state_k,
-                has_initial_state=has_initial_state,
-                cache_indices=non_spec_state_indices_tensor,
-                query_start_loc=non_spec_query_start_loc,
-                metadata=attn_metadata_narrowed,
-            ).transpose(0, 1)
-            v = causal_conv1d_fn(
-                v_proj_states,
-                v_conv_weights,
-                self.v_conv1d.bias,
-                activation="silu",
-                conv_states=conv_state_v,
-                has_initial_state=has_initial_state,
-                cache_indices=non_spec_state_indices_tensor,
-                query_start_loc=non_spec_query_start_loc,
-                metadata=attn_metadata_narrowed,
-            ).transpose(0, 1)
+        # Split tokens into the multi-query spec-decode part and the remaining
+        # (prefill / plain decode) part.
+        qkv_spec = qkv_ns = None
+        g1_spec = beta_spec = g1_ns = beta_ns = None
+        if spec_sequence_masks is not None:
+            if m.num_prefills == 0 and m.num_decodes == 0:
+                qkv_spec, g1_spec, beta_spec = qkv, g1, beta
+            else:
+                assert spec_token_indx is not None
+                assert non_spec_token_indx is not None
+                qkv_spec = tuple(x.index_select(0, spec_token_indx) for x in qkv)
+                g1_spec = g1.index_select(1, spec_token_indx)
+                beta_spec = beta.index_select(1, spec_token_indx)
+                qkv_ns = tuple(x.index_select(0, non_spec_token_indx) for x in qkv)
+                g1_ns = g1.index_select(1, non_spec_token_indx)
+                beta_ns = beta.index_select(1, non_spec_token_indx)
         else:
-            assert non_spec_state_indices_tensor is not None
-            decode_conv_indices = non_spec_state_indices_tensor[
-                : attn_metadata_narrowed.num_actual_tokens
-            ]
-            q = causal_conv1d_update(
-                q_proj_states,
-                conv_state_q,
-                q_conv_weights,
-                self.q_conv1d.bias,
-                activation="silu",
-                conv_state_indices=decode_conv_indices,
-                validate_data=True,
-            )
-            k = causal_conv1d_update(
-                k_proj_states,
-                conv_state_k,
-                k_conv_weights,
-                self.k_conv1d.bias,
-                activation="silu",
-                conv_state_indices=decode_conv_indices,
-                validate_data=True,
-            )
-            v = causal_conv1d_update(
-                v_proj_states,
-                conv_state_v,
-                v_conv_weights,
-                self.v_conv1d.bias,
-                activation="silu",
-                conv_state_indices=decode_conv_indices,
-                validate_data=True,
+            qkv_ns, g1_ns, beta_ns = qkv, g1, beta
+
+        core_attn_out_spec = None
+        if qkv_spec is not None:
+            assert g1_spec is not None and beta_spec is not None
+            core_attn_out_spec = self._forward_spec_decode(
+                qkv_spec,
+                g1_spec,
+                beta_spec,
+                conv_states,
+                conv_weights,
+                conv_biases,
+                recurrent_state,
+                m,
             )
 
-        q, k, v = map(
-            lambda x: rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim), (q, k, v)
+        core_attn_out_non_spec = None
+        if qkv_ns is not None:
+            assert g1_ns is not None and beta_ns is not None
+            core_attn_out_non_spec = self._forward_non_spec(
+                qkv_ns,
+                g1_ns,
+                beta_ns,
+                conv_states,
+                conv_weights,
+                conv_biases,
+                recurrent_state,
+                m,
+            )
+
+        if core_attn_out_spec is not None and core_attn_out_non_spec is not None:
+            # Mixed batches require indexed placement in the original order.
+            assert spec_token_indx is not None
+            assert non_spec_token_indx is not None
+            merged = torch.empty(
+                (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
+                dtype=core_attn_out_spec.dtype,
+                device=core_attn_out_spec.device,
+            )
+            merged.index_copy_(1, spec_token_indx, core_attn_out_spec)
+            merged.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
+            core_attn_out[0, :num_actual_tokens] = merged[0]
+        elif core_attn_out_non_spec is not None:
+            core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
+                0, :num_actual_tokens
+            ]
+        else:
+            assert core_attn_out_spec is not None
+            core_attn_out[0, :num_actual_tokens] = core_attn_out_spec[
+                0, :num_actual_tokens
+            ]
+
+    def _forward_spec_decode(
+        self,
+        qkv: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        g1: torch.Tensor,
+        beta: torch.Tensor,
+        conv_states: tuple[torch.Tensor, ...],
+        conv_weights: tuple[torch.Tensor, ...],
+        conv_biases: tuple[torch.Tensor | None, ...],
+        recurrent_state: torch.Tensor,
+        m: GDNAttentionMetadata,
+    ) -> torch.Tensor:
+        """Multi-query decode for sequences that carry draft tokens.
+
+        Each sequence consumes ``num_accepted_tokens`` from the previous step to
+        rewind its conv/recurrent state, then writes one state per query token
+        into the ``spec_state_indices_tensor`` slots so the next step can
+        resume from whichever draft token the verifier accepted last.
+        """
+        spec_state_indices_tensor = m.spec_state_indices_tensor
+        spec_query_start_loc = m.spec_query_start_loc
+        assert spec_state_indices_tensor is not None
+        assert spec_query_start_loc is not None
+        spec_conv_indices = spec_state_indices_tensor[:, 0][: m.num_spec_decodes]
+        spec_max_query_len = spec_state_indices_tensor.size(-1)
+
+        q, k, v = (
+            causal_conv1d_update(
+                x,
+                state,
+                weight,
+                bias,
+                activation="silu",
+                conv_state_indices=spec_conv_indices,
+                num_accepted_tokens=m.num_accepted_tokens,
+                query_start_loc=spec_query_start_loc,
+                max_query_len=spec_max_query_len,
+                validate_data=False,
+                out=torch.empty_like(x),
+            )
+            for x, state, weight, bias in zip(
+                qkv, conv_states, conv_weights, conv_biases
+            )
+        )
+        q, k, v = (
+            rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim) for x in (q, k, v)
+        )
+        g = fused_kda_gate(
+            rearrange(g1, "1 n h d -> n (h d)"),
+            self.A_log,
+            self.head_dim,
+            g_bias=self.dt_bias,
+        ).unsqueeze(0)
+        # The ``fused_recurrent_kda`` wrapper drops ``num_accepted_tokens``;
+        # call the forward directly to get the state-rewinding kernel variant.
+        core_attn_out_spec, _ = fused_recurrent_kda_fwd(
+            q=q.contiguous(),
+            k=k.contiguous(),
+            v=v.contiguous(),
+            g=g.contiguous(),
+            beta=beta.contiguous(),
+            scale=self.head_dim**-0.5,
+            initial_state=recurrent_state,
+            inplace_final_state=True,
+            cu_seqlens=spec_query_start_loc[: m.num_spec_decodes + 1],
+            ssm_state_indices=spec_state_indices_tensor,
+            num_accepted_tokens=m.num_accepted_tokens,
+            use_qk_l2norm_in_kernel=True,
+        )
+        return core_attn_out_spec
+
+    def _forward_non_spec(
+        self,
+        qkv: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        g1: torch.Tensor,
+        beta: torch.Tensor,
+        conv_states: tuple[torch.Tensor, ...],
+        conv_weights: tuple[torch.Tensor, ...],
+        conv_biases: tuple[torch.Tensor | None, ...],
+        recurrent_state: torch.Tensor,
+        m: GDNAttentionMetadata,
+    ) -> torch.Tensor:
+        has_initial_state = m.has_initial_state
+        non_spec_query_start_loc = m.non_spec_query_start_loc
+        non_spec_state_indices_tensor = m.non_spec_state_indices_tensor
+        assert non_spec_state_indices_tensor is not None
+
+        if m.num_prefills > 0:
+            q, k, v = (
+                causal_conv1d_fn(
+                    x.transpose(0, 1),
+                    weight,
+                    bias,
+                    activation="silu",
+                    conv_states=state,
+                    has_initial_state=has_initial_state,
+                    cache_indices=non_spec_state_indices_tensor,
+                    query_start_loc=non_spec_query_start_loc,
+                    metadata=m,
+                ).transpose(0, 1)
+                for x, state, weight, bias in zip(
+                    qkv, conv_states, conv_weights, conv_biases
+                )
+            )
+        else:
+            decode_conv_indices = non_spec_state_indices_tensor[: qkv[0].size(0)]
+            q, k, v = (
+                causal_conv1d_update(
+                    x,
+                    state,
+                    weight,
+                    bias,
+                    activation="silu",
+                    conv_state_indices=decode_conv_indices,
+                    validate_data=True,
+                )
+                for x, state, weight, bias in zip(
+                    qkv, conv_states, conv_weights, conv_biases
+                )
+            )
+
+        q, k, v = (
+            rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim) for x in (q, k, v)
         )
 
-        if attn_metadata_narrowed.num_prefills > 0:
-            assert non_spec_state_indices_tensor is not None
+        if m.num_prefills > 0:
             assert has_initial_state is not None
             zero_idx = non_spec_state_indices_tensor[~has_initial_state]
             recurrent_state[zero_idx] = 0
@@ -1003,7 +1120,7 @@ class SolarOpen2KimiDeltaAttention(GatedDeltaNetAttention):
             recurrent_state[non_spec_state_indices_tensor] = last_recurrent_state
         else:
             assert non_spec_query_start_loc is not None
-            g1 = fused_kda_gate(
+            g = fused_kda_gate(
                 rearrange(g1, "1 n h d -> n (h d)"),
                 self.A_log,
                 self.head_dim,
@@ -1016,18 +1133,14 @@ class SolarOpen2KimiDeltaAttention(GatedDeltaNetAttention):
                 q=q,
                 k=k,
                 v=v,
-                g=g1,
+                g=g,
                 beta=beta,
                 initial_state=recurrent_state,
                 use_qk_l2norm_in_kernel=True,
-                cu_seqlens=non_spec_query_start_loc[
-                    : attn_metadata_narrowed.num_decodes + 1
-                ],
+                cu_seqlens=non_spec_query_start_loc[: m.num_decodes + 1],
                 ssm_state_indices=non_spec_state_indices_tensor,
             )
-        core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
-            0, :num_actual_tokens
-        ]
+        return core_attn_out_non_spec
 
 
 class SolarOpen2DecoderLayer(nn.Module):
@@ -1131,7 +1244,7 @@ class SolarOpen2DecoderLayer(nn.Module):
         "inputs_embeds": 0,
     }
 )
-class SolarOpen2Model(nn.Module):
+class SolarOpen2Model(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -1174,7 +1287,7 @@ class SolarOpen2Model(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -1187,8 +1300,15 @@ class SolarOpen2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        for layer_idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
             hidden_states, residual = layer(positions, hidden_states, residual)
+            self._maybe_add_hidden_state(
+                aux_hidden_states, layer_idx + 1, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -1196,6 +1316,8 @@ class SolarOpen2Model(nn.Module):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
@@ -1301,9 +1423,10 @@ class SolarOpen2Model(nn.Module):
                         continue
 
                     # Remapping the name of FP8 kv-scale.
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
+                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                    if remapped_name is None:
                         continue
+                    name = remapped_name
 
                     if is_pp_missing_parameter(name, self):
                         continue
@@ -1319,6 +1442,8 @@ class SolarOpen2Model(nn.Module):
 
 
 class SolarOpen2MixtureOfExperts(MixtureOfExperts):
+    moe_mlp_layers: list["SolarOpen2MoE"]
+
     def extract_moe_parameters(self, example_moe: SolarOpen2MoE | None) -> None:
         if example_moe is None:
             raise RuntimeError("No SolarOpen2MoE layer found in model.layers.")
@@ -1352,6 +1477,7 @@ class SolarOpen2ForCausalLM(
     SupportsPP,
     SolarOpen2MixtureOfExperts,
     IsHybrid,
+    SupportsEagle3,
 ):
     # Not `SupportsLoRA`: adapters over the hybrid stack are untested. The
     # mapping below is still needed by loaders that fuse these projections.
@@ -1422,11 +1548,8 @@ class SolarOpen2ForCausalLM(
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
-        hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
-        )
-        return hidden_states
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
 
     @classmethod
     def get_mamba_state_dtype_from_config(
@@ -1440,7 +1563,7 @@ class SolarOpen2ForCausalLM(
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: "VllmConfig"
-    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
         tp_size = parallel_config.tensor_parallel_size

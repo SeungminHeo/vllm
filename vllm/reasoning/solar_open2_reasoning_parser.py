@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import regex as re
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
 
 if TYPE_CHECKING:
@@ -16,8 +16,7 @@ if TYPE_CHECKING:
 
 
 class SolarOpen2ReasoningParser(ReasoningParser):
-    """
-    Reasoning parser for Solar Open2 models.
+    """Reasoning parser for Solar Open2 models.
 
     Reasoning is delimited by the ``<|think:start|>`` and ``<|think:end|>``
     special tokens. The chat template always prefills ``<|think:start|>``

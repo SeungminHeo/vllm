@@ -87,6 +87,20 @@ RUN f=${DYNAMO_SITE}/vllm/instrumented_scheduler.py \
     && rm -rf ${DYNAMO_SITE}/vllm/__pycache__ \
     && python3 -c "import ast; ast.parse(open('$f').read())"
 
+# The frontend's vLLM chat processor (`--dyn-chat-processor vllm`, needed for
+# model-specific reasoning/tool parsers such as Solar Open2) imports
+# `make_tool_call_id` / `load_chat_template` from `vllm.entrypoints.chat_utils`,
+# which vLLM main moved to `vllm.renderers.chat_utils`.
+RUN cd ${DYNAMO_SITE} \
+    && grep -qx 'from vllm.entrypoints.chat_utils import make_tool_call_id' frontend/prepost.py \
+    && grep -qx 'from vllm.entrypoints.chat_utils import load_chat_template' frontend/vllm_processor.py \
+    && grep -qx '    from vllm.entrypoints.chat_utils import load_chat_template' vllm/realtime/factories.py \
+    && sed -i 's|^\( *\)from vllm.entrypoints.chat_utils import|\1from vllm.renderers.chat_utils import|' \
+        frontend/prepost.py frontend/vllm_processor.py vllm/realtime/factories.py \
+    && rm -rf frontend/__pycache__ vllm/__pycache__ vllm/realtime/__pycache__ \
+    && ! grep -rq --include='*.py' 'vllm.entrypoints.chat_utils' frontend vllm \
+    && python3 -c "import ast; [ast.parse(open(p).read()) for p in ('frontend/prepost.py', 'frontend/vllm_processor.py', 'vllm/realtime/factories.py')]"
+
 # The Dynamo operator/launch scripts pass full commands
 # (`python3 -m dynamo.vllm ...`, `python3 -m dynamo.frontend ...`),
 # so drop the `vllm serve` entrypoint inherited from the base image.
