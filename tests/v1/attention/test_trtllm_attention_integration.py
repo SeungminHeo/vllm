@@ -25,7 +25,12 @@ from vllm.utils.torch_utils import (
     set_random_seed,
 )
 from vllm.v1.attention.backends.utils import PerLayerParameters
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout, KVQuantMode
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheLayout,
+    KVQuantMode,
+    SlidingWindowSpec,
+)
 
 if not current_platform.is_device_capability_family(100):
     pytest.skip(
@@ -561,3 +566,35 @@ def test_trtllm_gen_draft_decode_metadata_tracks_in_place_seq_lens(
             assert torch.equal(value, expected), field.name
         else:
             assert value == expected, field.name
+
+
+def test_trtllm_gen_draft_decode_metadata_rebuilds_for_sliding_window(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A sliding-window draft group must not take the in-place draft decode
+    metadata path (DSpark drafts of sliding-window layers stop being accepted)."""
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.supports_trtllm_attention",
+        unittest.mock.Mock(return_value=True),
+    )
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
+        _mock_get_per_layer_parameters,
+    )
+    vllm_config = create_vllm_config(
+        model_name=MODEL, block_size=BLOCK_SIZE, num_gpu_blocks=NUM_GPU_BLOCKS
+    )
+    model_config = vllm_config.model_config
+    kv_cache_spec = SlidingWindowSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=model_config.get_num_kv_heads(vllm_config.parallel_config),
+        head_size=model_config.get_head_size(),
+        dtype=model_config.dtype,
+        sliding_window=128,
+    )
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    with set_current_vllm_config(vllm_config):
+        builder = FlashInferMetadataBuilder(
+            kv_cache_spec, ["test_layer_0"], vllm_config, device
+        )
+    assert not builder.supports_draft_decode_metadata_update

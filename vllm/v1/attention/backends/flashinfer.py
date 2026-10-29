@@ -97,6 +97,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     KVQuantMode,
+    get_kv_cache_spec_sliding_window,
     is_quantized_kv_cache,
     iter_layer_specs,
 )
@@ -1049,10 +1050,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
         # Fused draft steps advance seq_lens in place and keep block tables fixed,
         # so one trtllm-gen decode build serves every step (not DCP-local seq_lens).
+        # Sliding-window draft groups need the per-step rebuild: with the
+        # in-place path a DSpark draft of sliding-window layers drafts tokens the
+        # target almost never accepts.
         self.supports_draft_decode_metadata_update = (
             self.flashinfer_trtllm_api_decode_kernel
             == FlashInferDecodeKernel.TRTLLM_GEN
             and not self.use_dcp
+            and get_kv_cache_spec_sliding_window(self.kv_cache_spec) is None
         )
         self.use_fa2_native_decode = _use_fa2_native_decode()
         self._init_reorder_batch_threshold(
