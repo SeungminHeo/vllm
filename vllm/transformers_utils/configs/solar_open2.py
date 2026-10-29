@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
-class SolarOpen2Config(PretrainedConfig):
+class SolarOpen2Config(PreTrainedConfig):
     """Configuration for Solar Open 2 models served by vLLM."""
 
     model_type = "solar_open2"
