@@ -27,7 +27,7 @@ class AXK2Attention(DeepseekV32Attention):
        FlashMLA / FlashInfer sparse execution paths from DeepSeek V3.2.
 
     forward() mirrors DeepseekV32Attention.forward at the branch merge-base
-    (the ai.skt.vllm.merge_base_commit label in docker/Dockerfile.axk2);
+    (the ai.skt.vllm.merge_base_commit label in docker/Dockerfile.axiom);
     re-sync it whenever the parent's forward changes. Deltas: fused q + gate
     GEMM, output gate, single-token decode buffers, slot-gated KV-cache write.
     """

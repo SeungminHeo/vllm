@@ -1,9 +1,10 @@
-# NVIDIA Dynamo runtime image for the A.X-K2 branch.
+# AXIOM NVIDIA Dynamo runtime image for the feature/serving line: one image
+# serves every model the line carries (A.X-K2, A.X-K3 / K3 Flash, A.X-K1 / K1-Light and Solar Open2).
 #
-# Same overlay strategy and dual deployment flows as Dockerfile.axk2:
-#  * nightly flow (feature/ax-k2): base = vllm/vllm-openai:nightly-<sha>,
-#    <sha> binary-compatible with the branch merge-base (see Dockerfile.axk2).
-#  * release flow (release/ax-k2-v<tag>): base = vllm/vllm-openai:v<tag>.
+# Same overlay strategy and dual deployment flows as Dockerfile.axiom:
+#  * nightly flow (feature/serving): base = vllm/vllm-openai:nightly-<sha>,
+#    <sha> binary-compatible with the branch merge-base (see Dockerfile.axiom).
+#  * release flow (release/serving-v<tag>): base = vllm/vllm-openai:v<tag>.
 # Copy the branch's `vllm/` package over the base, then add the Dynamo runtime.
 #
 # `ai-dynamo[vllm]` pins `vllm==0.31.0`, which would clobber the overlaid
@@ -24,9 +25,10 @@
 #
 # Build (amd64):
 #   git archive HEAD vllm/ | tar -x -C <ctx>
-#   podman build --platform linux/amd64 -f docker/Dockerfile.axk2-dynamo \
+#   podman build --platform linux/amd64 -f docker/Dockerfile.axiom-dynamo \
 #       --build-arg VLLM_SRC_COMMIT=$(git rev-parse HEAD) \
-#       -t vllm-axk2-dynamo:<tag> <ctx>
+#       -t axiom/serving/ai-dynamo/vllm-runtime:<sha9>-axiom-dynamo<DYNAMO_VERSION> <ctx>
+# (release builds: v<tag>-axiom-dynamo<DYNAMO_VERSION>)
 ARG VLLM_BASE_COMMIT=49cb2bbf71cfd36ee5aa33d1e184b1cddff55294
 ARG BASE_IMAGE=docker.io/vllm/vllm-openai:nightly-${VLLM_BASE_COMMIT}
 FROM ${BASE_IMAGE}
@@ -42,8 +44,23 @@ ARG VLLM_SITE=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm
 
 COPY vllm/ ${VLLM_SITE}/
 
+# One image serves every model this line carries; fail the build if any of
+# them (or its parsers) did not make it into the overlay.
 RUN find ${VLLM_SITE} -name __pycache__ -type d -prune -exec rm -rf {} + \
     && grep -q tensor_model_parallel_all_reduce ${VLLM_SITE}/models/axk2/nvidia/model.py \
+    && for f in models/axk3/__init__.py \
+            model_executor/models/AXK1.py model_executor/models/axk1_light.py \
+            model_executor/models/solar_open2.py \
+            reasoning/axk3_reasoning_parser.py tool_parsers/axk3_tool_parser.py \
+            reasoning/solar_open2_reasoning_parser.py \
+            tool_parsers/solar_open2_tool_parser.py; do \
+        test -f ${VLLM_SITE}/$f || { echo "missing $f" >&2; exit 1; }; \
+    done \
+    && for a in AXK1ForCausalLM AXK1LightForCausalLM AXK2ForCausalLM \
+            AXK3ForCausalLM SolarOpen2ForCausalLM; do \
+        grep -q "\"$a\"" ${VLLM_SITE}/model_executor/models/registry.py \
+            || { echo "$a not registered" >&2; exit 1; }; \
+    done \
     && ls ${VLLM_SITE}/_C*.so ${VLLM_SITE}/_flashmla_C*.so >/dev/null
 
 RUN python3 -m pip list --format=freeze \
@@ -109,7 +126,7 @@ CMD ["/bin/bash"]
 
 # Declared last so a commit-only change keeps the pip layer cached.
 ARG VLLM_SRC_COMMIT=unknown
-LABEL org.opencontainers.image.source="https://github.com/SeungminHeo/vllm/tree/feature/ax-k2" \
+LABEL org.opencontainers.image.source="https://github.com/SeungminHeo/vllm/tree/feature/serving" \
       org.opencontainers.image.revision="${VLLM_SRC_COMMIT}" \
       ai.skt.vllm.merge_base_commit="49cb2bbf71cfd36ee5aa33d1e184b1cddff55294" \
       ai.skt.vllm.base_image_commit="${VLLM_BASE_COMMIT}" \
