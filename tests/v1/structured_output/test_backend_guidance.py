@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import time
 from concurrent.futures import Future
 
@@ -10,11 +11,15 @@ from vllm.config import StructuredOutputsConfig, VllmConfig
 from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import get_tokenizer
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.structured_output.backend_guidance import GuidanceBackend
+from vllm.v1.structured_output.backend_guidance import (
+    GuidanceBackend,
+    validate_guidance_grammar,
+)
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 
 TOKENIZER = "openai-community/gpt2"
@@ -231,3 +236,111 @@ def test_mistral_tokenizer_compile_grammar(
     grammar = backend.compile_grammar(request_type, grammar_spec)
     assert grammar is not None
     assert not grammar.is_terminated()
+
+
+HERMES_TOKENIZER = "Qwen/Qwen3-0.6B"
+CITY = {
+    "type": "object",
+    "properties": {"city": {"type": "string"}},
+    "required": ["city"],
+    "additionalProperties": False,
+}
+
+
+def _hermes_tag(names: list[str], at_least_one: bool, stop_after_first: bool):
+    """The tag the Dynamo frontend builds for the hermes tool parser."""
+    return {
+        "type": "structural_tag",
+        "format": {
+            "type": "triggered_tags",
+            "triggers": ["<tool_call>"],
+            "tags": [
+                {
+                    "type": "tag",
+                    "begin": f'<tool_call>\n{{"name": "{name}", "arguments": ',
+                    "content": {"type": "json_schema", "json_schema": CITY},
+                    "end": "}\n</tool_call>",
+                }
+                for name in names
+            ],
+            "at_least_one": at_least_one,
+            "stop_after_first": stop_after_first,
+        },
+    }
+
+
+def _call(name: str, args: str = '{"city": "Seoul"}') -> str:
+    return f'<tool_call>\n{{"name": "{name}", "arguments": {args}}}\n</tool_call>'
+
+
+@pytest.fixture(scope="module")
+def hermes_backend():
+    tokenizer = AutoTokenizer.from_pretrained(HERMES_TOKENIZER)
+    vllm_config = VllmConfig(
+        structured_outputs_config=StructuredOutputsConfig(backend="guidance")
+    )
+    backend = GuidanceBackend(
+        vllm_config, tokenizer=tokenizer, vocab_size=len(tokenizer)
+    )
+    return backend, tokenizer
+
+
+@pytest.mark.parametrize(
+    ("tag", "text", "complete"),
+    [
+        # tool_choice=auto: free text, calls, or both
+        (_hermes_tag(["get_time", "get_weather"], False, False), "Sunny.", True),
+        (
+            _hermes_tag(["get_time", "get_weather"], False, False),
+            "Checking.\n" + _call("get_weather") + "\n" + _call("get_time"),
+            True,
+        ),
+        (_hermes_tag(["get_time"], False, False), _call("rm"), False),
+        (_hermes_tag(["get_time"], False, False), _call("get_time", '{"x": 1}'), False),
+        # tool_choice=required: the output starts with a call, as in xgrammar
+        (_hermes_tag(["get_time"], True, False), _call("get_time") + " done", True),
+        (_hermes_tag(["get_time"], True, False), "Sure. " + _call("get_time"), False),
+        # tool_choice=named with parallel_tool_calls=false: exactly one call
+        (_hermes_tag(["get_time"], True, True), _call("get_time"), True),
+        (_hermes_tag(["get_time"], True, True), _call("get_time") + "more", False),
+        # tool_choice=none: the tool-call marker is banned
+        (
+            {
+                "type": "structural_tag",
+                "format": {
+                    "type": "tag",
+                    "begin": "",
+                    "content": {
+                        "type": "any_tokens",
+                        "exclude_tokens": ["<tool_call>"],
+                    },
+                    "end": "",
+                },
+            },
+            _call("get_time"),
+            False,
+        ),
+    ],
+)
+def test_guidance_structural_tag_format(hermes_backend, tag, text, complete):
+    """New-format structural tags (xgrammar `format` trees, as emitted by vLLM
+    tool parsers and Dynamo) compile on guidance and constrain tool calls,
+    including when the markers are added tokens llguidance treats as special."""
+    backend, tokenizer = hermes_backend
+    grammar = backend.compile_grammar(
+        StructuredOutputOptions.STRUCTURAL_TAG, json.dumps(tag)
+    )
+    tokens = tokenizer.encode(text, add_special_tokens=False) + [tokenizer.eos_token_id]
+    assert (grammar.validate_tokens(tokens) == tokens) == complete
+
+
+def test_guidance_structural_tag_unsupported_format_is_rejected():
+    tag = {
+        "type": "structural_tag",
+        "format": {"type": "json_schema", "json_schema": CITY, "style": "qwen_xml"},
+    }
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(structural_tag=json.dumps(tag))
+    )
+    with pytest.raises(VLLMValidationError, match="not supported by the guidance"):
+        validate_guidance_grammar(params)

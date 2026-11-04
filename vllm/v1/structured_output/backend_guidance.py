@@ -20,6 +20,10 @@ from vllm.v1.structured_output.backend_types import (
     StructuredOutputGrammar,
     StructuredOutputOptions,
 )
+from vllm.v1.structured_output.guidance_structural_tag import (
+    special_token_strings,
+    structural_tag_to_guidance_grammar,
+)
 from vllm.v1.structured_output.request import get_structured_output_key
 
 if TYPE_CHECKING:
@@ -105,6 +109,7 @@ class GuidanceBackend(StructuredOutputBackend):
             self.ll_tokenizer = llguidance_hf.from_tokenizer(
                 self.tokenizer, max(self.vocab_size, len(self.tokenizer))
             )
+        self.special_tokens = special_token_strings(self.ll_tokenizer)
 
     def compile_grammar(
         self,
@@ -117,6 +122,7 @@ class GuidanceBackend(StructuredOutputBackend):
             grammar_spec,
             self.disable_any_whitespace,
             self.disable_additional_properties,
+            special_tokens=self.special_tokens,
         )
 
         ll_matcher = llguidance.LLMatcher(
@@ -230,7 +236,17 @@ def serialize_guidance_grammar(
     grammar_spec: str | dict[str, Any],
     disable_any_whitespace: bool = False,
     disable_additional_properties: bool = False,
+    special_tokens: dict[str, int] | None = None,
 ) -> str:
+    def _inline_schema(schema: dict[str, Any]) -> dict[str, Any]:
+        if disable_additional_properties:
+            schema = process_for_additional_properties(schema)
+        schema = dict(schema)
+        schema.setdefault(
+            "x-guidance", {"whitespace_flexible": not disable_any_whitespace}
+        )
+        return schema
+
     def _process_schema(
         grammar_spec: str | dict[str, Any],
     ) -> str:
@@ -264,6 +280,10 @@ def serialize_guidance_grammar(
                 s_tag = json.loads(grammar_spec)
             else:
                 s_tag = grammar_spec
+            if "structures" not in s_tag:
+                return structural_tag_to_guidance_grammar(
+                    s_tag, special_tokens or {}, _inline_schema
+                )
             triggers: list[str] = s_tag["triggers"]
             tags: list[llguidance.StructTag] = []
             for s in s_tag["structures"]:
@@ -296,6 +316,17 @@ def serialize_guidance_grammar(
         return llguidance.grammar_from(tp, grammar_spec)
 
 
+_special_tokens_cache: dict[int, tuple[Any, dict[str, int]]] = {}
+
+
+def _cached_special_tokens(tokenizer: "llguidance.LLTokenizer") -> dict[str, int]:
+    cached = _special_tokens_cache.get(id(tokenizer))
+    if cached is None or cached[0] is not tokenizer:
+        cached = (tokenizer, special_token_strings(tokenizer))
+        _special_tokens_cache[id(tokenizer)] = cached
+    return cached[1]
+
+
 def validate_guidance_grammar(
     sampling_params: SamplingParams, tokenizer: llguidance.LLTokenizer | None = None
 ) -> None:
@@ -303,8 +334,15 @@ def validate_guidance_grammar(
     if sampling_params.structured_outputs is None:
         return
     tp, grm = get_structured_output_key(sampling_params.structured_outputs)
+    special_tokens = (
+        _cached_special_tokens(tokenizer)
+        if tokenizer is not None and tp == StructuredOutputOptions.STRUCTURAL_TAG
+        else None
+    )
     try:
-        guidance_grm = serialize_guidance_grammar(tp, grm)
+        guidance_grm = serialize_guidance_grammar(
+            tp, grm, special_tokens=special_tokens
+        )
     except (ValueError, KeyError, TypeError) as e:
         raise VLLMValidationError(f"Invalid grammar specification: {e}") from e
     err = llguidance.LLMatcher.validate_grammar(guidance_grm, tokenizer)
