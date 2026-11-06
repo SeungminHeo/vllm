@@ -46,6 +46,8 @@ class SolarOpen2ToolParser(ToolParser):
 
     TOOL_CALL_START = "<|tool_call:start|>"
     TOOL_CALL_END = "<|tool_call:end|>"
+    tool_call_start_token = TOOL_CALL_START
+    tool_call_end_token = TOOL_CALL_END
     TOOL_ARG_START = "<|tool_arg:start|>"
     TOOL_ARG_VALUE = "<|tool_arg:value|>"
     TOOL_ARG_END = "<|tool_arg:end|>"
