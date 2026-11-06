@@ -8,10 +8,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
-    WarmupIntRange,
-)
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonPointerInputVariant,
     TritonWarmupTensor,
@@ -349,7 +346,8 @@ class BuildPrefillChunkMetadataKernel(
             for ratio in (getattr(hf_config, "compress_ratios", None) or (1,))
         )
         return self._trace_dispatch(self.dispatch)(
-            query_slice_start=WarmupIntRange(0, 2),
+            # Cover Triton's divisible, exact-one, and generic i32 classes.
+            query_slice_start=(0, 1, 2),
             query_slice_stop=(1, 2 * max_tokens - 1, 2 * max_tokens),
             DCP_RANK=dcp_rank,
             DCP_WORLD=dcp_world,

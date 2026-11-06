@@ -604,6 +604,21 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         self.use_sparse = use_sparse
 
+        if vllm_config.kernel_config.enable_jit_warmup and (
+            self.attn_backend.get_name()
+            in (
+                "FLASHMLA_SPARSE",
+                "FLASHINFER_MLA_SPARSE",
+                "FLASHINFER_MLA_SPARSE_SM120",
+                "DEEPSEEK_V32_INDEXER",
+            )
+        ):
+            from vllm.v1.attention.backends.mla.indexer import (
+                _BUILD_PREFILL_CHUNK_METADATA_KERNEL,
+            )
+
+            _BUILD_PREFILL_CHUNK_METADATA_KERNEL.register_warmup()
+
         self.dcp_manager: MLADCPManager | None = None
         if self.impl.dcp_world_size > 1:
             query_dtype = (
