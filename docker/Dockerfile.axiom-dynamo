@@ -92,9 +92,8 @@ assert 'solar_open2' in get_reasoning_parser_names(); \
 assert 'solar_open2' in get_tool_parser_names(); \
 assert all(importlib.util.find_spec(m) for m in ('dynamo.vllm', 'dynamo.frontend'))"
 
+# The worker CLI initializes DeviceConfig even for --help; check it on a GPU.
 RUN uv run --no-project --no-config --no-sync --python /usr/bin/python3 \
-        python -m dynamo.vllm --help >/dev/null \
-    && uv run --no-project --no-config --no-sync --python /usr/bin/python3 \
         python -m dynamo.frontend --help >/dev/null
 
 # The Dynamo operator/launch scripts pass full commands
