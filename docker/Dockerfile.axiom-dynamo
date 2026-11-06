@@ -21,18 +21,18 @@ RUN uv pip install --python /workspace/.venv/bin/python \
 ENV PATH="/workspace/.venv/bin:${PATH}"
 ARG torch_cuda_arch_list="9.0 10.0"
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
-ARG max_jobs=12
 COPY CMakeLists.txt ./
 COPY cmake/ cmake/
 COPY csrc/ csrc/
 COPY tools/ tools/
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DVLLM_PYTHON_EXECUTABLE=/workspace/.venv/bin/python \
         -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
         -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
-        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DNVCC_THREADS=2 \
-    && cmake --build build --target _C_stable_libtorch -j "${max_jobs}" \
+        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DNVCC_THREADS=2
+ARG max_jobs=4
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    cmake --build build --target _C_stable_libtorch -j "${max_jobs}" \
     && cmake --install build --component _C_stable_libtorch --prefix /out
 
 FROM ${BASE_IMAGE}
