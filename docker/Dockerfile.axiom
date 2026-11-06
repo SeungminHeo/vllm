@@ -1,0 +1,37 @@
+# syntax=docker/dockerfile:1
+# Standalone AXIOM vLLM 0.29.0; build from the repository root on amd64.
+# Reuse the SM90/SM100 extension built and tested from a2aac4baba.
+# Rebuild that artifact if csrc/, cmake/, CMakeLists.txt or build requirements change.
+ARG KERNEL_IMAGE=533266999879.dkr.ecr.ap-northeast-2.amazonaws.com/axiom/serving/ai-dynamo/vllm-runtime@sha256:17cf68d09061da15aade876c8c8371579143f60126bac5a2a33cc19f487d6767
+ARG BASE_IMAGE=docker.io/vllm/vllm-openai:v0.29.0@sha256:c2914767605584b6d8f45686b82de173ecc99e781897aa3d0a66dacd72c51ae1
+FROM ${KERNEL_IMAGE} AS kernel-artifact
+FROM ${BASE_IMAGE}
+
+ARG VLLM_SITE=/usr/local/lib/python3.12/dist-packages/vllm
+COPY vllm/ ${VLLM_SITE}/
+COPY --from=kernel-artifact /usr/local/lib/python3.12/dist-packages/vllm/_C_stable_libtorch*.so ${VLLM_SITE}/
+
+RUN find ${VLLM_SITE} -name __pycache__ -type d -prune -exec rm -rf {} + \
+    && for a in AXK1ForCausalLM AXK1LightForCausalLM AXK2ForCausalLM \
+            AXK3ForCausalLM SolarOpen2ForCausalLM; do \
+        grep -q "\"$a\"" ${VLLM_SITE}/model_executor/models/registry.py \
+            || { echo "$a not registered" >&2; exit 1; }; \
+    done \
+    && uv run --no-project --no-config --python /usr/bin/python3 python -c "\
+import importlib.metadata as md, importlib.util; \
+assert md.version('vllm') == '0.29.0'; \
+assert md.version('torch') == '2.13.0+cu130'; \
+assert importlib.util.find_spec('dynamo') is None; \
+assert not any(d.metadata['Name'].lower().startswith('ai-dynamo') for d in md.distributions()); \
+from vllm.tool_parsers.solar_open2_tool_parser import SolarOpen2ToolParser as P; \
+assert P.tool_call_start_token == '<|tool_call:start|>'; \
+assert P.tool_call_end_token == '<|tool_call:end|>'"
+
+# Keep the upstream vllm serve entrypoint and its non-root wrapper.
+ARG VLLM_SRC_COMMIT=unknown
+LABEL org.opencontainers.image.source="https://github.com/SeungminHeo/vllm/tree/axiom/release-v0.29.0" \
+      org.opencontainers.image.revision="${VLLM_SRC_COMMIT}" \
+      ai.skt.vllm.base_image_tag="v0.29.0" \
+      ai.skt.vllm.cuda_cache_kernels="source-rebuilt" \
+      ai.skt.vllm.cuda_source_revision="a2aac4babaf8e858f162c2a9b3179b179a4b877b" \
+      ai.skt.vllm.variant="standalone"
