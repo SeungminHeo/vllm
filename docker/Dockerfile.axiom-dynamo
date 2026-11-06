@@ -118,6 +118,18 @@ RUN cd ${DYNAMO_SITE} \
     && ! grep -rq --include='*.py' 'vllm.entrypoints.chat_utils' frontend vllm \
     && python3 -c "import ast; [ast.parse(open(p).read()) for p in ('frontend/prepost.py', 'frontend/vllm_processor.py', 'vllm/realtime/factories.py')]"
 
+# Opt-in request-level engine warmup before a worker registers with the router
+# (vllm/axiom/dynamo_warmup.py, enabled with AXIOM_DYNAMO_WARMUP=1): a fresh
+# A.X-K2 worker otherwise JIT-compiles FA4 MLA prefill and sampling kernels on
+# its first requests (~9 s for an 8K prompt).
+RUN f=${DYNAMO_SITE}/vllm/worker_factory.py \
+    && test -f ${VLLM_SITE}/axiom/dynamo_warmup.py \
+    && grep -qx 'from .cache_info import configure_kv_event_block_size' $f \
+    && sed -i 's|^from \.cache_info import configure_kv_event_block_size$|from vllm.axiom.dynamo_warmup import with_engine_warmup\n\nfrom .cache_info import configure_kv_event_block_size as _configure_kv_event_block_size\n\nconfigure_kv_event_block_size = with_engine_warmup(_configure_kv_event_block_size)|' $f \
+    && grep -qx 'configure_kv_event_block_size = with_engine_warmup(_configure_kv_event_block_size)' $f \
+    && rm -rf ${DYNAMO_SITE}/vllm/__pycache__ \
+    && python3 -c "import ast; ast.parse(open('$f').read())"
+
 # The Dynamo operator/launch scripts pass full commands
 # (`python3 -m dynamo.vllm ...`, `python3 -m dynamo.frontend ...`),
 # so drop the `vllm serve` entrypoint inherited from the base image.
