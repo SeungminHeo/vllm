@@ -54,7 +54,7 @@ CPU checks during the port used the repository's existing tests:
 
 - K3 reasoning/tool parsers and Solar configuration: 159 passed, 1 skipped.
 - Solar reasoning/tool parsers, Solar KDA dispatch, and K3 model unit tests:
-  376 passed.
+  375 passed.
 - Guidance backend tests: 16 passed with the CPU platform explicitly selected.
 
 On macOS the tests' GPU cleanup fixture crashes in PyTorch's
