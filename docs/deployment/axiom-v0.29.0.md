@@ -95,3 +95,26 @@ These cover the rebuilt FP8 cache-scale kernels, their FlashMLA consumer,
 K3 gated residuals, and bias-free grouped routing. Full checkpoint generation,
 model evaluations, and serving throughput benchmarks were not run. No serving
 workload was updated; the delivery scope was image build and registry push.
+
+### Solar tool-marker fix
+
+Commit `eb9aba4edf` exposes `tool_call_start_token` and `tool_call_end_token`
+on `SolarOpen2ToolParser`, matching the production overlay. Dynamo's vLLM
+postprocessor uses these attributes to identify parser-owned boundaries,
+including tool calls immediately after reasoning ends.
+
+The replacement image reuses the previous image by digest and replaces only
+`vllm/tool_parsers/solar_open2_tool_parser.py`; CUDA binaries and dependencies
+are unchanged:
+
+```text
+533266999879.dkr.ecr.ap-northeast-2.amazonaws.com/axiom/serving/ai-dynamo/vllm-runtime:v0.29.0-axiom-eb9aba4ed-dynamo1.6.1-solarrt526ee9c6df2f
+sha256:52f079c766b84ab33732e4fcca5f6d2336d7cfbc08bdd2ebec62dd9fd036d18d
+```
+
+The existing Solar tool-parser suite passed all 235 tests. In the built image,
+the installed Dynamo `StreamingPostProcessor` reproduced the named-tool failure
+with the two attributes removed. With the fix, all 8 combinations of named/auto,
+streaming/non-streaming, and complete/split tool-call output passed, including
+reasoning-end and tool-start in the same chunk. This is a deterministic
+postprocessor check, not live model generation or an HTTP serving test.
