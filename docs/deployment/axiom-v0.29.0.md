@@ -188,3 +188,32 @@ Dynamo 1.6.1 validates `strict` function schemas the way OpenAI does: a
 parameters object without `"additionalProperties": false` is rejected with
 HTTP 400 (`object schemas require additionalProperties: false`). Dynamo 1.5.0
 accepted such schemas. With the field set, strict tool calls succeed.
+
+### AXIOM Dynamo runtime dd50b60b1db1
+
+Commit `0c91bcf585` replaces the Solar runtime wheel (`526ee9c6df2f`) with the
+`axiom-runtime-1.6.1-dd50b60b1db1` release of `SeungminHeo/dynamo`. The image
+is a thin rebuild of the `v0.29.0-axiom-8852023f0-…` image by digest that
+reinstalls only `ai-dynamo-runtime` (hash-pinned, `--no-deps`) and updates the
+provenance files and labels. vLLM, CUDA binaries and other packages are
+unchanged.
+
+```text
+533266999879.dkr.ecr.ap-northeast-2.amazonaws.com/axiom/serving/ai-dynamo/vllm-runtime:v0.29.0-axiom-0c91bcf58-dynamo1.6.1-axiomrtdd50b60b1db1
+sha256:b75706aa1e82857bb344299103c40343b3b240b617f0ae6c1bbd77dd059b2852
+```
+
+Runtime changes, from the release notes:
+
+- Hermes native tool extraction requires `<tool_call>`; unmarked JSON stays
+  content.
+- `tools: []` is accepted when `tool_choice` is omitted, `none` or `auto`.
+- `strict` function-schema validation stays on by default. Setting
+  `DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION=1` on the frontend before it
+  starts skips the shape check (for example, a missing
+  `"additionalProperties": false`) while clients migrate.
+
+The build checked the installed wheel's origin and version, the Solar Open2
+and Hermes parser registrations, the warmup patch in `worker_factory.py`, and
+`python -m dynamo.frontend --help`. These checks ran under amd64 emulation
+without a GPU; the image has not been tested with a live model.
