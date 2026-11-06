@@ -118,3 +118,33 @@ with the two attributes removed. With the fix, all 8 combinations of named/auto,
 streaming/non-streaming, and complete/split tool-call output passed, including
 reasoning-end and tool-start in the same chunk. This is a deterministic
 postprocessor check, not live model generation or an HTTP serving test.
+
+## Standalone vLLM image (without Dynamo)
+
+Built from `4ad63d69bbe911567ef2b04e727a3c6ba8c84d00` and pushed on 2026-11-06:
+
+```text
+533266999879.dkr.ecr.ap-northeast-2.amazonaws.com/axiom/serving/vllm-openai:v0.29.0-axiom-4ad63d69b
+sha256:2a31d0e22b74ab2913a72378634611314cd82fc39eb3a61ac733d5cc21534dfc
+```
+
+This includes the AXIOM model/parser ports and Solar tool-marker fix. Build it
+with `docker/Dockerfile.axiom` from the repository root, passing
+`--build-arg VLLM_SRC_COMMIT="$(git rev-parse HEAD)"` and `--platform linux/amd64`.
+The final base is the official vLLM 0.29.0 image; only `_C_stable_libtorch` is
+copied from the previously validated kernel artifact. Dynamo packages and
+runtime libraries are not copied. The default entrypoint remains `vllm serve`.
+
+The kernel artifact is pinned to the earlier Dynamo image digest
+`17cf68d09061da15aade876c8c8371579143f60126bac5a2a33cc19f487d6767`.
+Retain that image while this Dockerfile uses it. Its CUDA inputs are unchanged
+from this branch; rebuild the artifact before using changes to `csrc/`,
+`cmake/`, `CMakeLists.txt`, or `requirements/build/`.
+
+The pushed image was pulled onto NVIDIA B200. Checks confirmed vLLM 0.29.0,
+PyTorch 2.13.0+cu130, no `dynamo` module or `ai-dynamo*` distributions, the Solar
+tool markers, and successful `vllm serve --help`. The 235 Solar tool-parser
+tests plus the GPU suite listed above produced **305 passed, 3 skipped** in
+93.60 seconds against the installed image package. The skips are unsupported
+MLA cache dtype/rank combinations. Full model generation and serving performance
+were not evaluated, and no serving workload was replaced.
