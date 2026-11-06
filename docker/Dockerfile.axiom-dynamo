@@ -78,7 +78,7 @@ RUN uv pip list --system --format=freeze \
         "ray>=2.55.0" \
         "librosa>=0.10.0" \
         "soundfile>=0.13.1" \
-    && ${INSTALLER} --no-deps --reinstall --require-hashes \
+    && env -u UV_OVERRIDE ${INSTALLER} --no-deps --reinstall --require-hashes \
         -r /opt/axiom/dynamo/solar-runtime.requirements.txt \
     && rm /tmp/base-constraints.txt \
     && uv run --no-project --no-config --no-sync --python /usr/bin/python3 python -c "\
