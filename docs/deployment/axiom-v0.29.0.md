@@ -62,3 +62,36 @@ On macOS the tests' GPU cleanup fixture crashes in PyTorch's
 marker. These checks do not establish GPU model accuracy or serving
 performance. Validate model generation and speculative acceptance on the
 intended checkpoint before changing a serving workload.
+
+## Published image
+
+Built and pushed on 2026-11-06 from commit
+`a2aac4babaf8e858f162c2a9b3179b179a4b877b`:
+
+```text
+533266999879.dkr.ecr.ap-northeast-2.amazonaws.com/axiom/serving/ai-dynamo/vllm-runtime:v0.29.0-axiom-a2aac4bab-dynamo1.6.1-solarrt526ee9c6df2f
+sha256:17cf68d09061da15aade876c8c8371579143f60126bac5a2a33cc19f487d6767
+```
+
+The pushed image was pulled and tested on NVIDIA B200 (SM100, driver
+580.95.05). Both Dynamo frontend and worker `--help` checks passed. Installed
+versions were vLLM 0.29.0, PyTorch 2.13.0+cu130, Dynamo/runtime 1.6.1,
+NIXL 1.3.2, and NCCL 2.30.7; the Solar reasoning/tool parsers were registered.
+
+The following existing tests ran against the installed image package,
+without a source-tree vLLM override: **70 passed, 3 skipped** in 98.54 seconds.
+The three skips are unsupported dtype/rank combinations in the MLA cache test.
+
+```bash
+.venv/bin/python -m pytest -q \
+    tests/kernels/test_axk3_gated_residual.py \
+    tests/kernels/moe/test_grouped_topk.py::test_bias_free_grouped_topk \
+    tests/kernels/attention/test_cache.py::test_concat_and_cache_ds_mla \
+    tests/kernels/attention/test_kimi_k3_mla_key_concat_kv_cache.py \
+    tests/kernels/attention/test_flashmla_sparse.py::test_sparse_flashmla_decode_matches_cache_writer_scales
+```
+
+These cover the rebuilt FP8 cache-scale kernels, their FlashMLA consumer,
+K3 gated residuals, and bias-free grouped routing. Full checkpoint generation,
+model evaluations, and serving throughput benchmarks were not run. No serving
+workload was updated; the delivery scope was image build and registry push.
