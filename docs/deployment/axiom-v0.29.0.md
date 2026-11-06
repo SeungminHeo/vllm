@@ -155,3 +155,36 @@ checks, and the identical parser/kernel suite passed: **305 passed, 3 skipped**
 in 68.27 seconds. The same three unsupported MLA cache dtype/rank combinations
 were skipped. This confirms the tested kernels on both H200 and B200; test
 durations are not serving-performance measurements.
+
+### JIT warmup (indexer backport and Dynamo request warmup)
+
+Commits `9df0c4bb06` and `8852023f08` change only Python files and the Dynamo
+`worker_factory.py` patch, so the image is a thin rebuild of the
+`v0.29.0-axiom-eb9aba4ed-…` image: the four changed `vllm/` files are copied in
+and the `Dockerfile.axiom-dynamo` sed step is run. CUDA binaries and
+dependencies are unchanged.
+
+```text
+533266999879.dkr.ecr.ap-northeast-2.amazonaws.com/axiom/serving/ai-dynamo/vllm-runtime:v0.29.0-axiom-8852023f0-dynamo1.6.1-solarrt526ee9c6df2f
+sha256:b29b835d6c9824ffac17ced1a2bdef6d927a108f9992cbf5299ec81d78cddcc6
+```
+
+- The V2 model runner now collects JIT warmup providers while loading the
+  model; for A.X-K2 the startup "JIT kernel warmup" compiles 18 keys instead of
+  none.
+- `AXIOM_DYNAMO_WARMUP=1` on a worker runs `vllm/axiom/dynamo_warmup.py` before
+  the worker registers with the router. It is off by default.
+
+Tested on NVIDIA B200 with A.X-K2 NVFP4 (one TP4 + EP worker, EAGLE3,
+`--structured-outputs-config '{"backend":"guidance"}'`, `AXIOM_DYNAMO_WARMUP=1`):
+the request warmup took about 25 s, no kernel compiled during inference after
+registration, and the first 6K / 16K-token requests took 0.43–0.51 / 0.94 s.
+GSM8K (500, 5-shot) scored 0.924; 64 tool calls and 255 json_schema replay
+requests were all valid. Against the production A.X-K2 deployment (v0.29.0
+image with Dynamo 1.5.0) under greedy decoding, decision fields, final answers
+and tool calls agreed as often as two runs of production agree with each other.
+
+Dynamo 1.6.1 validates `strict` function schemas the way OpenAI does: a
+parameters object without `"additionalProperties": false` is rejected with
+HTTP 400 (`object schemas require additionalProperties: false`). Dynamo 1.5.0
+accepted such schemas. With the field set, strict tool calls succeed.
