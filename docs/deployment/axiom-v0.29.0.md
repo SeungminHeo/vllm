@@ -148,3 +148,10 @@ tests plus the GPU suite listed above produced **305 passed, 3 skipped** in
 93.60 seconds against the installed image package. The skips are unsupported
 MLA cache dtype/rank combinations. Full model generation and serving performance
 were not evaluated, and no serving workload was replaced.
+
+The same standalone image digest was also tested on NVIDIA H200 (SM90,
+driver 580.178.04) in IPP on 2026-11-06. `vllm serve --help`, package/version
+checks, and the identical parser/kernel suite passed: **305 passed, 3 skipped**
+in 68.27 seconds. The same three unsupported MLA cache dtype/rank combinations
+were skipped. This confirms the tested kernels on both H200 and B200; test
+durations are not serving-performance measurements.
