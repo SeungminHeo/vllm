@@ -1,0 +1,1 @@
+ai-dynamo-runtime @ https://github.com/SeungminHeo/dynamo/releases/download/solar-runtime-1.6.1-526ee9c6df2f/ai_dynamo_runtime-1.6.1-cp310-abi3-manylinux_2_28_x86_64.whl --hash=sha256:14efc2beb957436ad9983dfaafb0bd00013d23106f7ca457fb7ad0f88c4b1eb3

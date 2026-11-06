@@ -1,0 +1,36 @@
+{
+  "repository": "SeungminHeo/dynamo",
+  "dynamo_commit": "526ee9c6df2f6f54eb7842402d7ae84aa0832323",
+  "frontend_dependencies": {
+    "dynamo-parsers": {
+      "git": "https://github.com/SeungminHeo/frontend-crates.git",
+      "rev": "4a9f26c2ab9aa4272b6391bb6abe3920179ea3db"
+    },
+    "dynamo-protocols": {
+      "git": "https://github.com/SeungminHeo/frontend-crates.git",
+      "rev": "4a9f26c2ab9aa4272b6391bb6abe3920179ea3db"
+    }
+  },
+  "workflow_run": "https://github.com/SeungminHeo/dynamo/actions/runs/42036864676",
+  "workflow_source": "https://github.com/SeungminHeo/dynamo/blob/526ee9c6df2f6f54eb7842402d7ae84aa0832323/.github/workflows/solar-runtime-wheel.yml",
+  "build_command": "maturin build --locked --release --interpreter /opt/python/cp312-cp312/bin/python --compatibility manylinux_2_28 --features kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3 --out ../../../dist",
+  "rustflags": [
+    "-C",
+    "target-cpu=x86-64-v3",
+    "-C",
+    "force-frame-pointers=yes",
+    "--cfg",
+    "tokio_unstable"
+  ],
+  "cargo_environment": {
+    "PCRE2_SYS_STATIC": "1"
+  },
+  "wheel": "ai_dynamo_runtime-1.6.1-cp310-abi3-manylinux_2_28_x86_64.whl",
+  "wheel_version": "1.6.1",
+  "wheel_tags": [
+    "cp310-abi3-manylinux_2_28_x86_64"
+  ],
+  "wheel_sha256": "14efc2beb957436ad9983dfaafb0bd00013d23106f7ca457fb7ad0f88c4b1eb3",
+  "wheel_url": "https://github.com/SeungminHeo/dynamo/releases/download/solar-runtime-1.6.1-526ee9c6df2f/ai_dynamo_runtime-1.6.1-cp310-abi3-manylinux_2_28_x86_64.whl",
+  "release_tag": "solar-runtime-1.6.1-526ee9c6df2f"
+}

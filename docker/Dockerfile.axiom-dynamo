@@ -1,0 +1,105 @@
+# syntax=docker/dockerfile:1
+# AXIOM v0.29.0 with rebuilt CUDA cache kernels and the Solar Dynamo runtime.
+# Build from the repository root with --platform linux/amd64.
+# Install Dynamo without [vllm] to preserve the base's vLLM, Torch and NIXL.
+# Preserve base dependencies except Dynamo's pydantic/certifi/protos constraints.
+# v0.29.0 retains get_engine_zmq_addresses, skipped_waiting and entrypoints.chat_utils;
+# none of the axiom/main-only Dynamo compatibility patches apply here.
+ARG VLLM_BASE_TAG=v0.29.0
+ARG BASE_IMAGE=docker.io/vllm/vllm-openai:${VLLM_BASE_TAG}
+FROM nvidia/cuda:13.0.3-devel-ubuntu24.04 AS cuda-build
+COPY --from=ghcr.io/astral-sh/uv:0.9.4 /uv /usr/local/bin/uv
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential git ca-certificates curl ccache \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace
+RUN uv venv --python 3.12 /workspace/.venv
+COPY requirements/build/cuda.txt requirements/build/cuda.txt
+RUN uv pip install --python /workspace/.venv/bin/python \
+    -r requirements/build/cuda.txt --extra-index-url https://download.pytorch.org/whl/cu130
+ENV PATH="/workspace/.venv/bin:${PATH}"
+ARG torch_cuda_arch_list="9.0 10.0"
+ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
+ARG max_jobs=12
+COPY CMakeLists.txt ./
+COPY cmake/ cmake/
+COPY csrc/ csrc/
+COPY tools/ tools/
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DVLLM_PYTHON_EXECUTABLE=/workspace/.venv/bin/python \
+        -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+        -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
+        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DNVCC_THREADS=2 \
+    && cmake --build build --target _C_stable_libtorch -j "${max_jobs}" \
+    && cmake --install build --component _C_stable_libtorch --prefix /out
+
+FROM ${BASE_IMAGE}
+
+ARG PYTHON_VERSION=3.12
+ARG VLLM_BASE_TAG
+ARG DYNAMO_VERSION=1.6.1
+ARG INSTALLER="uv pip install --system"
+ARG NIXL_VERSION=1.3.2
+ARG VLLM_SITE=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm
+
+COPY vllm/ ${VLLM_SITE}/
+COPY --from=cuda-build /out/vllm/_C_stable_libtorch*.so ${VLLM_SITE}/
+
+# One image serves every model this line carries; fail the build if any of
+# them (or its parsers) did not make it into the overlay.
+RUN find ${VLLM_SITE} -name __pycache__ -type d -prune -exec rm -rf {} + \
+    && grep -q tensor_model_parallel_all_reduce ${VLLM_SITE}/models/axk2/nvidia/model.py \
+    && for f in models/axk3/__init__.py \
+            model_executor/models/AXK1.py model_executor/models/axk1_light.py \
+            model_executor/models/solar_open2.py \
+            reasoning/axk3_reasoning_parser.py tool_parsers/axk3_tool_parser.py \
+            reasoning/solar_open2_reasoning_parser.py \
+            tool_parsers/solar_open2_tool_parser.py; do \
+        test -f ${VLLM_SITE}/$f || { echo "missing $f" >&2; exit 1; }; \
+    done \
+    && for a in AXK1ForCausalLM AXK1LightForCausalLM AXK2ForCausalLM \
+            AXK3ForCausalLM SolarOpen2ForCausalLM; do \
+        grep -q "\"$a\"" ${VLLM_SITE}/model_executor/models/registry.py \
+            || { echo "$a not registered" >&2; exit 1; }; \
+    done \
+    && ls ${VLLM_SITE}/_C*.so ${VLLM_SITE}/_flashmla_C*.so >/dev/null
+
+COPY docker/dynamo/ /opt/axiom/dynamo/
+
+RUN uv pip list --system --format=freeze \
+        | grep -viE '^(pydantic(-core|_core)?|certifi|googleapis-common-protos)==' \
+        > /tmp/base-constraints.txt \
+    && ${INSTALLER} -c /tmp/base-constraints.txt \
+        "ai-dynamo==${DYNAMO_VERSION}" \
+        uvloop \
+        "blake3>=1.0.0,<2.0.0" \
+        "ray>=2.55.0" \
+        "librosa>=0.10.0" \
+        "soundfile>=0.13.1" \
+    && ${INSTALLER} --no-deps --reinstall --require-hashes \
+        -r /opt/axiom/dynamo/solar-runtime.requirements.txt \
+    && rm /tmp/base-constraints.txt \
+    && uv run --no-project --no-config --no-sync --python /usr/bin/python3 python -c "\
+import importlib.metadata as md, importlib.util; \
+assert md.version('vllm').startswith('0.29.0'), md.version('vllm'); \
+assert md.version('ai-dynamo-runtime') == md.version('ai-dynamo'); \
+assert md.version('nixl-cu13') == '${NIXL_VERSION}', md.version('nixl-cu13'); \
+import dynamo.runtime; \
+assert all(importlib.util.find_spec(m) for m in ('dynamo.vllm', 'dynamo.frontend'))"
+
+# The Dynamo operator/launch scripts pass full commands
+# (`python3 -m dynamo.vllm ...`, `python3 -m dynamo.frontend ...`),
+# so drop the `vllm serve` entrypoint inherited from the base image.
+ENTRYPOINT []
+CMD ["/bin/bash"]
+
+# Declared last so a commit-only change keeps the pip layer cached.
+ARG VLLM_SRC_COMMIT=unknown
+LABEL org.opencontainers.image.source="https://github.com/SeungminHeo/vllm/tree/axiom/release-v0.29.0" \
+      org.opencontainers.image.revision="${VLLM_SRC_COMMIT}" \
+      ai.skt.vllm.base_image_tag="${VLLM_BASE_TAG}" \
+      ai.skt.vllm.cuda_cache_kernels="source-rebuilt" \
+      ai.skt.dynamo.version="${DYNAMO_VERSION}" \
+      ai.skt.dynamo.runtime_revision="526ee9c6df2f6f54eb7842402d7ae84aa0832323" \
+      ai.skt.dynamo.runtime_sha256="14efc2beb957436ad9983dfaafb0bd00013d23106f7ca457fb7ad0f88c4b1eb3"
