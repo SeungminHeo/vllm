@@ -6,6 +6,8 @@
 #    <sha> binary-compatible with the branch merge-base (see Dockerfile.axiom).
 #  * release flow (axiom/release-v<tag>): base = vllm/vllm-openai:v<tag>.
 # Copy the branch's `vllm/` package over the base, then add the Dynamo runtime.
+# docker/dynamo/axiom-runtime.requirements.txt pins the custom ai-dynamo-runtime
+# wheel (SeungminHeo/dynamo axiom-runtime release) by URL and SHA-256.
 #
 # `ai-dynamo[vllm]` pins `vllm==0.31.0`, which would clobber the overlaid
 # branch sources, so we install `ai-dynamo` without the extra and pull in the
@@ -24,7 +26,7 @@
 # (aggregated + disagg prefill/decode) after any Dynamo or branch bump.
 #
 # Build (amd64):
-#   git archive HEAD vllm/ | tar -x -C <ctx>
+#   git archive HEAD vllm/ docker/dynamo/ | tar -x -C <ctx>
 #   podman build --platform linux/amd64 -f docker/Dockerfile.axiom-dynamo \
 #       --build-arg VLLM_SRC_COMMIT=$(git rev-parse HEAD) \
 #       -t axiom/serving/ai-dynamo/vllm-runtime:<sha9>-axiom-dynamo<DYNAMO_VERSION> <ctx>
@@ -63,6 +65,8 @@ RUN find ${VLLM_SITE} -name __pycache__ -type d -prune -exec rm -rf {} + \
     done \
     && ls ${VLLM_SITE}/_C*.so ${VLLM_SITE}/_flashmla_C*.so >/dev/null
 
+COPY docker/dynamo/ /opt/axiom/dynamo/
+
 RUN python3 -m pip list --format=freeze \
         | grep -viE '^(pydantic(-core|_core)?|certifi|googleapis-common-protos)==' \
         > /tmp/base-constraints.txt \
@@ -73,12 +77,17 @@ RUN python3 -m pip list --format=freeze \
         "ray>=2.55.0" \
         "librosa>=0.10.0" \
         "soundfile>=0.13.1" \
+    && env -u UV_OVERRIDE ${INSTALLER} --no-deps --force-reinstall --require-hashes \
+        -r /opt/axiom/dynamo/axiom-runtime.requirements.txt \
     && rm /tmp/base-constraints.txt \
     && python3 -c "\
 import importlib.metadata as md, importlib.util; \
 assert md.version('ai-dynamo-runtime') == md.version('ai-dynamo'); \
 assert md.version('nixl-cu13') == '${NIXL_VERSION}', md.version('nixl-cu13'); \
 import dynamo.runtime; \
+from dynamo._core import get_reasoning_parser_names, get_tool_parser_names; \
+assert 'solar_open2' in get_reasoning_parser_names(); \
+assert {'solar_open2', 'hermes'} <= set(get_tool_parser_names()); \
 assert all(importlib.util.find_spec(m) for m in ('dynamo.vllm', 'dynamo.frontend'))"
 
 # Dynamo 1.5.x / 1.6.x import `get_engine_zmq_addresses` at module load in a file
@@ -142,4 +151,6 @@ LABEL org.opencontainers.image.source="https://github.com/SeungminHeo/vllm/tree/
       org.opencontainers.image.revision="${VLLM_SRC_COMMIT}" \
       ai.skt.vllm.merge_base_commit="49cb2bbf71cfd36ee5aa33d1e184b1cddff55294" \
       ai.skt.vllm.base_image_commit="${VLLM_BASE_COMMIT}" \
-      ai.skt.dynamo.version="${DYNAMO_VERSION}"
+      ai.skt.dynamo.version="${DYNAMO_VERSION}" \
+      ai.skt.dynamo.runtime_revision="dd50b60b1db1d164cf1f37bb0f4787be9d1f512c" \
+      ai.skt.dynamo.runtime_sha256="b7c91ca1ecb63bf1ce4e316ba34ad310406deff9065712d7b0a7b631232281dc"

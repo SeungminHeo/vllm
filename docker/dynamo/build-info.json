@@ -1,0 +1,17 @@
+{
+  "repository": "SeungminHeo/dynamo",
+  "dynamo_commit": "dd50b60b1db1d164cf1f37bb0f4787be9d1f512c",
+  "parser_git": "https://github.com/SeungminHeo/frontend-crates.git",
+  "parser_commit": "8870bba39bd875abaf266c3e02ac8cd1385ad4af",
+  "hermes_native_requires_start_token": true,
+  "guided_bare_json_preserved": true,
+  "empty_tools_allowed_without_forced_choice": true,
+  "strict_schema_migration_env": "DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION",
+  "strict_schema_validation_default": "enabled",
+  "run_url": "https://github.com/SeungminHeo/dynamo/actions/runs/42205217285",
+  "wheel": "ai_dynamo_runtime-1.6.1-cp310-abi3-manylinux_2_28_x86_64.whl",
+  "wheel_version": "1.6.1",
+  "wheel_sha256": "b7c91ca1ecb63bf1ce4e316ba34ad310406deff9065712d7b0a7b631232281dc",
+  "wheel_url": "https://github.com/SeungminHeo/dynamo/releases/download/axiom-runtime-1.6.1-dd50b60b1db1/ai_dynamo_runtime-1.6.1-cp310-abi3-manylinux_2_28_x86_64.whl",
+  "release_tag": "axiom-runtime-1.6.1-dd50b60b1db1"
+}
