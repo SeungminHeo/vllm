@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /workspace
 RUN uv venv --python 3.12 /workspace/.venv
 COPY requirements/build/cuda.txt requirements/build/cuda.txt
+ENV UV_INDEX_STRATEGY=unsafe-best-match
 RUN uv pip install --python /workspace/.venv/bin/python \
     -r requirements/build/cuda.txt --extra-index-url https://download.pytorch.org/whl/cu130
 ENV PATH="/workspace/.venv/bin:${PATH}"
