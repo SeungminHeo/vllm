@@ -28,7 +28,7 @@ Other compiled extensions come from the official 0.29.0 image. The default
 CUDA targets are SM90 and SM100 (Hopper and Blackwell); override
 `torch_cuda_arch_list` when building for other GPUs. `max_jobs` defaults to 4 to bound CUDA compiler memory use.
 
-`docker/dynamo/solar-runtime.requirements.txt` pins the custom runtime wheel
+`docker/dynamo/axiom-runtime.requirements.txt` pins the custom runtime wheel
 URL and SHA-256. The image installs it with `--no-deps --reinstall
 --require-hashes` after `ai-dynamo==1.6.1`. Its release provenance is retained
 at `/opt/axiom/dynamo/build-info.json` and in image labels.

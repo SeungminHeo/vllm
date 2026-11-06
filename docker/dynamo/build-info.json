@@ -1,36 +1,17 @@
 {
   "repository": "SeungminHeo/dynamo",
-  "dynamo_commit": "526ee9c6df2f6f54eb7842402d7ae84aa0832323",
-  "frontend_dependencies": {
-    "dynamo-parsers": {
-      "git": "https://github.com/SeungminHeo/frontend-crates.git",
-      "rev": "4a9f26c2ab9aa4272b6391bb6abe3920179ea3db"
-    },
-    "dynamo-protocols": {
-      "git": "https://github.com/SeungminHeo/frontend-crates.git",
-      "rev": "4a9f26c2ab9aa4272b6391bb6abe3920179ea3db"
-    }
-  },
-  "workflow_run": "https://github.com/SeungminHeo/dynamo/actions/runs/42036864676",
-  "workflow_source": "https://github.com/SeungminHeo/dynamo/blob/526ee9c6df2f6f54eb7842402d7ae84aa0832323/.github/workflows/solar-runtime-wheel.yml",
-  "build_command": "maturin build --locked --release --interpreter /opt/python/cp312-cp312/bin/python --compatibility manylinux_2_28 --features kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3 --out ../../../dist",
-  "rustflags": [
-    "-C",
-    "target-cpu=x86-64-v3",
-    "-C",
-    "force-frame-pointers=yes",
-    "--cfg",
-    "tokio_unstable"
-  ],
-  "cargo_environment": {
-    "PCRE2_SYS_STATIC": "1"
-  },
+  "dynamo_commit": "dd50b60b1db1d164cf1f37bb0f4787be9d1f512c",
+  "parser_git": "https://github.com/SeungminHeo/frontend-crates.git",
+  "parser_commit": "8870bba39bd875abaf266c3e02ac8cd1385ad4af",
+  "hermes_native_requires_start_token": true,
+  "guided_bare_json_preserved": true,
+  "empty_tools_allowed_without_forced_choice": true,
+  "strict_schema_migration_env": "DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION",
+  "strict_schema_validation_default": "enabled",
+  "run_url": "https://github.com/SeungminHeo/dynamo/actions/runs/42205217285",
   "wheel": "ai_dynamo_runtime-1.6.1-cp310-abi3-manylinux_2_28_x86_64.whl",
   "wheel_version": "1.6.1",
-  "wheel_tags": [
-    "cp310-abi3-manylinux_2_28_x86_64"
-  ],
-  "wheel_sha256": "14efc2beb957436ad9983dfaafb0bd00013d23106f7ca457fb7ad0f88c4b1eb3",
-  "wheel_url": "https://github.com/SeungminHeo/dynamo/releases/download/solar-runtime-1.6.1-526ee9c6df2f/ai_dynamo_runtime-1.6.1-cp310-abi3-manylinux_2_28_x86_64.whl",
-  "release_tag": "solar-runtime-1.6.1-526ee9c6df2f"
+  "wheel_sha256": "b7c91ca1ecb63bf1ce4e316ba34ad310406deff9065712d7b0a7b631232281dc",
+  "wheel_url": "https://github.com/SeungminHeo/dynamo/releases/download/axiom-runtime-1.6.1-dd50b60b1db1/ai_dynamo_runtime-1.6.1-cp310-abi3-manylinux_2_28_x86_64.whl",
+  "release_tag": "axiom-runtime-1.6.1-dd50b60b1db1"
 }

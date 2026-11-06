@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# AXIOM v0.29.0 with rebuilt CUDA cache kernels and the Solar Dynamo runtime.
+# AXIOM v0.29.0 with rebuilt CUDA cache kernels and the AXIOM Dynamo runtime.
 # Build from the repository root with --platform linux/amd64.
 # Install Dynamo without [vllm] to preserve the base's vLLM, Torch and NIXL.
 # Preserve base dependencies except Dynamo's pydantic/certifi/protos constraints.
@@ -79,7 +79,7 @@ RUN uv pip list --system --format=freeze \
         "librosa>=0.10.0" \
         "soundfile>=0.13.1" \
     && env -u UV_OVERRIDE ${INSTALLER} --no-deps --reinstall --require-hashes \
-        -r /opt/axiom/dynamo/solar-runtime.requirements.txt \
+        -r /opt/axiom/dynamo/axiom-runtime.requirements.txt \
     && rm /tmp/base-constraints.txt \
     && uv run --no-project --no-config --no-sync --python /usr/bin/python3 python -c "\
 import importlib.metadata as md, importlib.util; \
@@ -122,5 +122,5 @@ LABEL org.opencontainers.image.source="https://github.com/SeungminHeo/vllm/tree/
       ai.skt.vllm.base_image_tag="${VLLM_BASE_TAG}" \
       ai.skt.vllm.cuda_cache_kernels="source-rebuilt" \
       ai.skt.dynamo.version="${DYNAMO_VERSION}" \
-      ai.skt.dynamo.runtime_revision="526ee9c6df2f6f54eb7842402d7ae84aa0832323" \
-      ai.skt.dynamo.runtime_sha256="14efc2beb957436ad9983dfaafb0bd00013d23106f7ca457fb7ad0f88c4b1eb3"
+      ai.skt.dynamo.runtime_revision="dd50b60b1db1d164cf1f37bb0f4787be9d1f512c" \
+      ai.skt.dynamo.runtime_sha256="b7c91ca1ecb63bf1ce4e316ba34ad310406deff9065712d7b0a7b631232281dc"
