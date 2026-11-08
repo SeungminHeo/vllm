@@ -139,7 +139,10 @@ def axk2_gated_rmsnorm_triton(
     elif BLOCK_H <= 4096:
         num_warps = 8
     else:
-        num_warps = 16
+        # Triton 3.8 compiles the 16-warp variant without FMAs and with 78
+        # registers (2x slower per launch on B200 than Triton 3.7.1); 8 warps
+        # with the register cap lifted recovers ~20 % on 3.8 and is level on 3.7.
+        num_warps = 8
 
     _axk2_gated_rmsnorm_kernel[grid](
         x_2d,
@@ -158,6 +161,7 @@ def axk2_gated_rmsnorm_triton(
         HAS_RESIDUAL=residual is not None,
         BLOCK_H=BLOCK_H,
         num_warps=num_warps,
+        maxnreg=255,
     )
 
     out = out_2d.reshape(orig_shape)
