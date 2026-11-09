@@ -5,7 +5,8 @@
 #  * nightly flow (axiom/main): base = vllm/vllm-openai:nightly-<sha>,
 #    <sha> binary-compatible with the branch merge-base (see Dockerfile.axiom).
 #  * release flow (axiom/release-v<tag>): base = vllm/vllm-openai:v<tag>.
-# Copy the branch's `vllm/` package over the base, then add the Dynamo runtime.
+# Add the AWS EFA userspace, copy the branch's `vllm/` package over the base,
+# then add the Dynamo runtime.
 # docker/dynamo/axiom-runtime.requirements.txt pins the custom ai-dynamo-runtime
 # wheel (SeungminHeo/dynamo axiom-runtime release) by URL and SHA-256.
 #
@@ -43,6 +44,38 @@ ARG DYNAMO_VERSION=1.6.1
 ARG INSTALLER="uv pip install --system"
 ARG NIXL_VERSION=1.5.2
 ARG VLLM_SITE=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm
+
+# AWS EFA userspace (libfabric + EFA provider, aws-ofi-nccl, hwloc), the same
+# minimal install as docker/Dockerfile.efa, so the NIXL LIBFABRIC backend and
+# Mooncake's `efa` protocol (the 0.3.14 wheel dlopens
+# /opt/amazon/efa/lib/libfabric.so) work on EFA hosts. Unlike Dockerfile.efa,
+# NCCL is not routed over EFA by default and the Mooncake / DeepEP wheels stay
+# as the base ships them: EFA deployments set NCCL_NET_PLUGIN=ofi and
+# NCCL_TUNER_PLUGIN=ofi, InfiniBand hosts keep NCCL's built-in IB transport.
+# Declared before the overlay so source-only changes keep this layer cached.
+ARG EFA_INSTALLER_VERSION=1.51.0
+ARG EFA_INSTALLER_SHA256=83993044fa4df3dc2f8b5c2f7051d61b9689441be023a2c92ea51d3f53f2465c
+RUN set -eux; \
+    EFA_INSTALLER_ARCHIVE="/tmp/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"; \
+    curl -fsSL --retry 3 --retry-all-errors \
+        "https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz" \
+        -o "${EFA_INSTALLER_ARCHIVE}"; \
+    echo "${EFA_INSTALLER_SHA256}  ${EFA_INSTALLER_ARCHIVE}" | sha256sum -c -; \
+    tar -xzf "${EFA_INSTALLER_ARCHIVE}" -C /tmp; \
+    apt-get update -y; \
+    (cd /tmp/aws-efa-installer && \
+        ./efa_installer.sh --skip-mpi --skip-rdma-core --build-ngc); \
+    /opt/amazon/efa/bin/fi_info --version; \
+    /opt/amazon/efa/bin/fi_info -l | grep -q '^efa:'; \
+    ldconfig -p | grep -q '/opt/amazon/ofi-nccl/lib/libnccl-net-ofi\.so$'; \
+    ldconfig -p | grep -q '/opt/amazon/ofi-nccl/lib/libnccl-tuner-ofi\.so$'; \
+    NIXL_EFA_PLUGIN=$(python3 -c "import importlib.util, os; \
+s = importlib.util.find_spec('nixl_cu13'); \
+print(os.path.join(os.path.dirname(s.origin), '..', 'nixl_cu13.libs', 'nixl', 'libplugin_LIBFABRIC.so'))"); \
+    ldd "${NIXL_EFA_PLUGIN}" | grep -q 'libfabric\.so\.1 => /opt/amazon/efa/lib/'; \
+    ldd "${NIXL_EFA_PLUGIN}" | grep -q 'libhwloc\.so\.15 => /'; \
+    apt-get clean; \
+    rm -rf "${EFA_INSTALLER_ARCHIVE}" /tmp/aws-efa-installer /var/lib/apt/lists/*
 
 COPY vllm/ ${VLLM_SITE}/
 
@@ -153,4 +186,5 @@ LABEL org.opencontainers.image.source="https://github.com/SeungminHeo/vllm/tree/
       ai.skt.vllm.base_image_commit="${VLLM_BASE_COMMIT}" \
       ai.skt.dynamo.version="${DYNAMO_VERSION}" \
       ai.skt.dynamo.runtime_revision="dd50b60b1db1d164cf1f37bb0f4787be9d1f512c" \
-      ai.skt.dynamo.runtime_sha256="b7c91ca1ecb63bf1ce4e316ba34ad310406deff9065712d7b0a7b631232281dc"
+      ai.skt.dynamo.runtime_sha256="b7c91ca1ecb63bf1ce4e316ba34ad310406deff9065712d7b0a7b631232281dc" \
+      ai.skt.efa.installer_version="${EFA_INSTALLER_VERSION}"

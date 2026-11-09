@@ -1,0 +1,79 @@
+# AWS EFA variant of the AXIOM Dynamo runtime image (docker/Dockerfile.axiom-dynamo).
+#
+# The base already carries the EFA userspace (libfabric + EFA provider,
+# aws-ofi-nccl, hwloc), so NIXL LIBFABRIC and Mooncake `efa` work there. This
+# variant adds what would change behaviour on InfiniBand hosts:
+#  * DeepEP rebuilt from the amazon-contributing fork (= vLLM's DeepEP pin
+#    minus #752, plus GIN unordered dispatch/combine), whose deepep_v2 backend
+#    carries EP traffic over EFA (SRD delivers out of order) through NCCL GIN.
+#  * NCCL routed over EFA by default (NCCL_NET_PLUGIN / NCCL_TUNER_PLUGIN=ofi).
+# Same DeepEP build as docker/Dockerfile.efa.
+#
+# Build (amd64), on top of a pushed or locally built Dockerfile.axiom-dynamo image:
+#   podman build --platform linux/amd64 -f docker/Dockerfile.axiom-dynamo-efa \
+#       --build-arg BASE_IMAGE=<registry>/vllm-runtime:<tag> \
+#       -t <registry>/vllm-runtime:<tag>-efa docker/
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+# uv segfaults under qemu user emulation; override with
+# --build-arg INSTALLER="python3 -m pip install" for cross-arch local builds.
+ARG INSTALLER="uv pip install --system"
+ARG DEEPEP_REPO="https://github.com/amazon-contributing/DeepEP.git"
+ARG DEEPEP_REF="874779c9ccd2294b56304bd6cc5f138f1f71d097"
+ARG DEEPEP_CUDA_ARCH_LIST="9.0a;10.0a;10.3a"
+
+RUN set -eux; \
+    test -x /opt/amazon/efa/bin/fi_info; \
+    ldconfig -p | grep -q '/opt/amazon/ofi-nccl/lib/libnccl-net-ofi\.so$'
+
+# Headers and git for DeepEP's nvcc build. `reinstall` also installs packages
+# that are absent.
+RUN set -eux; \
+    CUDA_PKG_VERSION=$(nvcc --version \
+        | grep -oP 'release \K[0-9]+\.[0-9]+' | tr '.' '-'); \
+    DEBIAN_FRONTEND=noninteractive apt-get update -y; \
+    DEBIAN_FRONTEND=noninteractive apt-get reinstall -y --no-install-recommends \
+        git \
+        libcusparse-dev-${CUDA_PKG_VERSION} \
+        libcusolver-dev-${CUDA_PKG_VERSION} \
+        cuda-nvrtc-dev-${CUDA_PKG_VERSION}; \
+    rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    git clone "${DEEPEP_REPO}" /tmp/deepep; \
+    cd /tmp/deepep; \
+    git checkout "${DEEPEP_REF}"; \
+    git submodule update --init --recursive; \
+    python3 -m pip uninstall -y deep_ep; \
+    NCCL_ROOT="$(python3 -c "import importlib.util, os; \
+s = importlib.util.find_spec('nvidia.nccl'); \
+print(os.path.dirname(s.origin or s.submodule_search_locations[0]))")/nccl"; \
+    export EP_NCCL_ROOT_DIR="${NCCL_ROOT}"; \
+    export LD_LIBRARY_PATH="${NCCL_ROOT}/lib:${LD_LIBRARY_PATH:-}"; \
+    # The CUDA driver stubs let DeepEP link libcuda in a builder with no driver.
+    export LIBRARY_PATH="${NCCL_ROOT}/lib:/usr/local/cuda/lib64/stubs:\
+/usr/local/cuda/targets/x86_64-linux/lib/stubs:${LIBRARY_PATH:-}"; \
+    export DISABLE_AGGRESSIVE_PTX_INSTRS=1; \
+    export TORCH_CUDA_ARCH_LIST="${DEEPEP_CUDA_ARCH_LIST}"; \
+    ${INSTALLER} --no-deps --no-build-isolation .; \
+    cd /; \
+    rm -rf /tmp/deepep; \
+    # deep_ep._C needs libcuda.so.1 at import; resolve it to the stub here.
+    mkdir /tmp/cuda-stub; \
+    ln -s /usr/local/cuda/lib64/stubs/libcuda.so /tmp/cuda-stub/libcuda.so.1; \
+    # vLLM only logs when the deepep_v2 backend is unavailable, so fail here.
+    LD_LIBRARY_PATH=/tmp/cuda-stub:${LD_LIBRARY_PATH:-} python3 -c "\
+import deep_ep; assert hasattr(deep_ep, 'ElasticBuffer'), \
+'DeepEP built without the ElasticBuffer (v2) API'"; \
+    rm -rf /tmp/cuda-stub
+
+# Route NCCL over EFA. Override with `NCCL_NET_PLUGIN= NCCL_TUNER_PLUGIN=` to
+# run this image on a non-EFA host.
+ENV NCCL_NET_PLUGIN=ofi \
+    NCCL_TUNER_PLUGIN=ofi
+
+ARG BASE_IMAGE
+LABEL ai.skt.efa.base_image="${BASE_IMAGE}" \
+      ai.skt.efa.deepep_repo="${DEEPEP_REPO}" \
+      ai.skt.efa.deepep_ref="${DEEPEP_REF}"
