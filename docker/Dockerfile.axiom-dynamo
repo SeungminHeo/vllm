@@ -12,7 +12,7 @@
 # `ai-dynamo[vllm]` pins `vllm==0.31.0`, which would clobber the overlaid
 # branch sources, so we install `ai-dynamo` without the extra and pull in the
 # extra's runtime deps (uvloop, blake3, ray, librosa, soundfile) explicitly.
-# The base already ships `nixl==1.5.0` (requirements/kv_connectors.txt);
+# The base already ships `nixl==1.5.2` (requirements/kv_connectors.txt);
 # reinstalling the extra's `nixl[cu13]==1.4.1` would downgrade it and drag
 # torch into the resolve, whose NCCL pin would undo the base's NCCL (DeepEPv2).
 # Every other base package is pinned too (Dynamo would otherwise pull
@@ -41,7 +41,7 @@ ARG DYNAMO_VERSION=1.6.1
 # uv segfaults under qemu user emulation; override with
 # --build-arg INSTALLER="python3 -m pip install" for cross-arch local builds.
 ARG INSTALLER="uv pip install --system"
-ARG NIXL_VERSION=1.5.0
+ARG NIXL_VERSION=1.5.2
 ARG VLLM_SITE=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm
 
 COPY vllm/ ${VLLM_SITE}/
