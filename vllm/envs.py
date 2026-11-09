@@ -201,6 +201,7 @@ if TYPE_CHECKING:
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_USING_PATHWAYS: bool = False
     VLLM_USE_DEEP_GEMM: bool = True
+    VLLM_AXK2_GATED_RMSNORM_BACKEND: Literal["auto", "triton"] = "auto"
     VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
@@ -1660,6 +1661,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM": lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "1"))),
+    # A.X-K2 gated RMSNorm kernel: "auto" uses the CuTe DSL cluster kernels
+    # (row kernel for decode batches, tensor-core tile kernel above) with the
+    # per-row Triton kernel as fallback; "triton" forces the Triton kernel.
+    "VLLM_AXK2_GATED_RMSNORM_BACKEND": env_with_choices(
+        "VLLM_AXK2_GATED_RMSNORM_BACKEND", "auto", ["auto", "triton"]
+    ),
     # Allow use of DeepGemm specifically for MoE fused ops (overrides only MoE).
     "VLLM_MOE_USE_DEEP_GEMM": lambda: bool(
         int(os.getenv("VLLM_MOE_USE_DEEP_GEMM", "1"))

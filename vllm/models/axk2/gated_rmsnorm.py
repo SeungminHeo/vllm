@@ -1,15 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""A.X-K2 gated RMSNorm: RMSNorm -> low-rank (16) gate -> sigmoid.
+
+    h    = x (+ residual, written back to residual in bf16)
+    y    = h * rsqrt(mean(h^2) + eps) * w_norm
+    z    = silu(y @ W_down^T)                 [R], R = 16
+    out  = y * sigmoid(z @ W_up^T)
+
+Served by the CuTe DSL cluster kernels in gated_rmsnorm_cute.py (a row kernel
+for decode batches, a tensor-core tile kernel above ~#SMs / 4 rows; B200,
+H = 7168: 3.7 us at M <= 8, 9.3 us at M = 400, 149 us at M = 8192 per launch
+against 9.9 / 28.9 / 533 us for the per-row Triton kernel below), which stays
+as the fallback when CuTe DSL is unavailable or the GPU has no thread block
+clusters. All kernels keep fp32 inside and round to bf16 once.
+"""
 
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
+logger = init_logger(__name__)
 
+RANK = 16
+
+
+# ---------------------------------------------------------------------------
+# Per-row Triton kernel (one program per row)
+# ---------------------------------------------------------------------------
 @triton.jit
 def _axk2_gated_rmsnorm_kernel(
     # Pointers
@@ -97,6 +120,25 @@ def _next_power_of_2(n: int) -> int:
     return 1 << (n - 1).bit_length()
 
 
+def _check_inputs(x, residual, w_norm, w_down, w_up):
+    H = x.shape[-1]
+    R = w_down.shape[0]
+    # The kernels index raw pointers and store bf16.
+    assert x.dtype == torch.bfloat16
+    assert w_norm.shape == (H,) and w_norm.is_contiguous()
+    assert w_down.shape == (R, H) and w_down.is_contiguous()
+    assert w_up.shape == (H, R) and w_up.is_contiguous()
+    x_2d = x.reshape(-1, H)
+    assert x_2d.stride(-1) == 1
+    residual_2d: torch.Tensor | None = None
+    if residual is not None:
+        assert residual.shape == x.shape and residual.dtype == x.dtype
+        # view, not reshape: a copy would drop the in-place residual update.
+        residual_2d = residual.view(-1, H)
+        assert residual_2d.stride(-1) == 1
+    return x_2d, residual_2d
+
+
 def axk2_gated_rmsnorm_triton(
     x: torch.Tensor,
     residual: torch.Tensor | None,
@@ -107,23 +149,9 @@ def axk2_gated_rmsnorm_triton(
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     orig_shape = x.shape
     H = orig_shape[-1]
-    M = x.numel() // H
     R = w_down.shape[0]
-
-    # The kernel indexes raw pointers and stores bf16.
-    assert x.dtype == torch.bfloat16
-    assert w_norm.shape == (H,) and w_norm.is_contiguous()
-    assert w_down.shape == (R, H) and w_down.is_contiguous()
-    assert w_up.shape == (H, R) and w_up.is_contiguous()
-
-    x_2d = x.reshape(M, H)
-    assert x_2d.stride(-1) == 1
-    residual_2d: torch.Tensor | None = None
-    if residual is not None:
-        assert residual.shape == x.shape and residual.dtype == x.dtype
-        # view, not reshape: a copy would drop the in-place residual update.
-        residual_2d = residual.view(M, H)
-        assert residual_2d.stride(-1) == 1
+    x_2d, residual_2d = _check_inputs(x, residual, w_norm, w_down, w_up)
+    M = x_2d.shape[0]
 
     BLOCK_H = _next_power_of_2(H)
 
@@ -168,14 +196,64 @@ def axk2_gated_rmsnorm_triton(
     return out, residual
 
 
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+def _cute_kernel():
+    from vllm.models.axk2.gated_rmsnorm_cute import cute_gated_rmsnorm
+
+    return cute_gated_rmsnorm()
+
+
+_CUTE_WARMED: set[tuple] = set()
+
+
+def _warm_cute(H: int, eps: float, device: torch.device) -> None:
+    """Compile every CuTe variant on the first call for this shape (the eager
+    profile run), so no JIT happens inside CUDA graph capture."""
+    key = (H, eps, device)
+    if key in _CUTE_WARMED:
+        return
+    _CUTE_WARMED.add(key)
+    kern = _cute_kernel()
+    if kern is not None and torch.cuda.get_device_properties(device).major >= 9:
+        kern.warmup(H, eps, device)
+
+
+def pick_backend(x: torch.Tensor, w_down: torch.Tensor) -> str:
+    """Kernel for this call: "cute" (row or tile kernel, chosen inside by the
+    number of rows) or the per-row "triton" fallback."""
+    if envs.VLLM_AXK2_GATED_RMSNORM_BACKEND == "triton":
+        return "triton"
+    H = x.shape[-1]
+    kern = _cute_kernel()
+    if (
+        kern is not None
+        and w_down.shape[0] == RANK
+        and kern.row_supported(H)
+        and torch.cuda.get_device_properties(x.device).major >= 9
+    ):
+        return "cute"
+    return "triton"
+
+
 def _axk2_gated_rmsnorm_impl(
     x: torch.Tensor,
     residual: torch.Tensor | None,
     w_norm: torch.Tensor,
     w_down: torch.Tensor,
     w_up: torch.Tensor,
+    w_up_frag: torch.Tensor,
     eps: float,
 ) -> torch.Tensor:
+    if envs.VLLM_AXK2_GATED_RMSNORM_BACKEND != "triton":
+        _warm_cute(x.shape[-1], float(eps), x.device)
+    if pick_backend(x, w_down) == "cute":
+        kern = _cute_kernel()
+        assert kern is not None
+        x_2d, residual_2d = _check_inputs(x, residual, w_norm, w_down, w_up)
+        out = kern(x_2d, residual_2d, w_norm, w_down, w_up, w_up_frag, eps)
+        return out.view(x.shape)
     out, _ = axk2_gated_rmsnorm_triton(x, residual, w_norm, w_down, w_up, eps)
     return out
 
@@ -186,6 +264,7 @@ def _axk2_gated_rmsnorm_fake(
     w_norm: torch.Tensor,
     w_down: torch.Tensor,
     w_up: torch.Tensor,
+    w_up_frag: torch.Tensor,
     eps: float,
 ) -> torch.Tensor:
     return torch.empty_like(x)
@@ -200,7 +279,7 @@ direct_register_custom_op(
 
 
 class AXK2GatedRMSNorm(nn.Module):
-    """Gated RMSNorm with low-rank bottleneck fused into Triton kernel."""
+    """Gated RMSNorm with low-rank bottleneck fused into one kernel."""
 
     def __init__(
         self,
@@ -229,10 +308,24 @@ class AXK2GatedRMSNorm(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.W_up",
         )
+        self._w_up_frag_cache: torch.Tensor | None = None
+        self._w_up_frag_src: torch.Tensor | None = None
 
     @property
     def weight(self) -> torch.Tensor:
         return self.norm.weight
+
+    def _w_up_frag(self) -> torch.Tensor:
+        """W_up in the tile kernel's fragment order ([hidden / 32, 32, rank],
+        gated_rmsnorm_cute.make_wu_frag), built on the first forward after the
+        weights are loaded (the eager profile run, before CUDA graph capture)."""
+        from vllm.models.axk2.gated_rmsnorm_cute import make_wu_frag
+
+        w_up = self.W_up.weight
+        if self._w_up_frag_cache is None or self._w_up_frag_src is not w_up:
+            self._w_up_frag_cache = make_wu_frag(w_up)
+            self._w_up_frag_src = w_up
+        return self._w_up_frag_cache
 
     @property
     def variance_epsilon(self) -> float:
@@ -261,6 +354,7 @@ class AXK2GatedRMSNorm(nn.Module):
             self.norm.weight,
             self.W_down.weight,
             self.W_up.weight,
+            self._w_up_frag(),
             self.eps,
         )
         if residual is not None:
