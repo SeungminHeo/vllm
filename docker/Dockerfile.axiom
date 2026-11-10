@@ -17,7 +17,7 @@
 #       --build-arg VLLM_SRC_COMMIT=$(git rev-parse HEAD) \
 #       -t axiom/serving/vllm-openai:<sha9>-axiom <ctx>
 # (release builds: v<tag>-axiom)
-ARG VLLM_BASE_COMMIT=49cb2bbf71cfd36ee5aa33d1e184b1cddff55294
+ARG VLLM_BASE_COMMIT=cf5cea2da37d3dfed27d2e0aa3041c3e553c2d57
 ARG BASE_IMAGE=docker.io/vllm/vllm-openai:nightly-${VLLM_BASE_COMMIT}
 FROM ${BASE_IMAGE}
 
@@ -25,6 +25,38 @@ ARG PYTHON_VERSION=3.12
 ARG VLLM_SRC_COMMIT=unknown
 ARG VLLM_BASE_COMMIT
 ARG VLLM_SITE=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm
+
+# AWS EFA userspace (libfabric + EFA provider, aws-ofi-nccl, hwloc), the same
+# minimal install as docker/Dockerfile.efa, so the NIXL LIBFABRIC backend and
+# Mooncake's `efa` protocol (the 0.3.14 wheel dlopens
+# /opt/amazon/efa/lib/libfabric.so) work on EFA hosts. Unlike Dockerfile.efa,
+# NCCL is not routed over EFA by default and the Mooncake / DeepEP wheels stay
+# as the base ships them: EFA deployments set NCCL_NET_PLUGIN=ofi and
+# NCCL_TUNER_PLUGIN=ofi, InfiniBand hosts keep NCCL's built-in IB transport.
+# Declared before the overlay so source-only changes keep this layer cached.
+ARG EFA_INSTALLER_VERSION=1.51.0
+ARG EFA_INSTALLER_SHA256=83993044fa4df3dc2f8b5c2f7051d61b9689441be023a2c92ea51d3f53f2465c
+RUN set -eux; \
+    EFA_INSTALLER_ARCHIVE="/tmp/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"; \
+    curl -fsSL --retry 3 --retry-all-errors \
+        "https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz" \
+        -o "${EFA_INSTALLER_ARCHIVE}"; \
+    echo "${EFA_INSTALLER_SHA256}  ${EFA_INSTALLER_ARCHIVE}" | sha256sum -c -; \
+    tar -xzf "${EFA_INSTALLER_ARCHIVE}" -C /tmp; \
+    apt-get update -y; \
+    (cd /tmp/aws-efa-installer && \
+        ./efa_installer.sh --skip-mpi --skip-rdma-core --build-ngc); \
+    /opt/amazon/efa/bin/fi_info --version; \
+    /opt/amazon/efa/bin/fi_info -l | grep -q '^efa:'; \
+    ldconfig -p | grep -q '/opt/amazon/ofi-nccl/lib/libnccl-net-ofi\.so$'; \
+    ldconfig -p | grep -q '/opt/amazon/ofi-nccl/lib/libnccl-tuner-ofi\.so$'; \
+    NIXL_EFA_PLUGIN=$(python3 -c "import importlib.util, os; \
+s = importlib.util.find_spec('nixl_cu13'); \
+print(os.path.join(os.path.dirname(s.origin), '..', 'nixl_cu13.libs', 'nixl', 'libplugin_LIBFABRIC.so'))"); \
+    ldd "${NIXL_EFA_PLUGIN}" | grep -q 'libfabric\.so\.1 => /opt/amazon/efa/lib/'; \
+    ldd "${NIXL_EFA_PLUGIN}" | grep -q 'libhwloc\.so\.15 => /'; \
+    apt-get clean; \
+    rm -rf "${EFA_INSTALLER_ARCHIVE}" /tmp/aws-efa-installer /var/lib/apt/lists/*
 
 COPY vllm/ ${VLLM_SITE}/
 
@@ -49,5 +81,6 @@ RUN find ${VLLM_SITE} -name __pycache__ -type d -prune -exec rm -rf {} + \
 
 LABEL org.opencontainers.image.source="https://github.com/SeungminHeo/vllm/tree/axiom/main" \
       org.opencontainers.image.revision="${VLLM_SRC_COMMIT}" \
-      ai.skt.vllm.merge_base_commit="49cb2bbf71cfd36ee5aa33d1e184b1cddff55294" \
-      ai.skt.vllm.base_image_commit="${VLLM_BASE_COMMIT}"
+      ai.skt.vllm.merge_base_commit="cf5cea2da37d3dfed27d2e0aa3041c3e553c2d57" \
+      ai.skt.vllm.base_image_commit="${VLLM_BASE_COMMIT}" \
+      ai.skt.efa.installer_version="${EFA_INSTALLER_VERSION}"
