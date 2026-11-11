@@ -1,0 +1,106 @@
+# Dynamo 1.6.2 + integrated Axiom runtime variant of the AXIOM Dynamo image
+# (docker/Dockerfile.axiom-dynamo), for A.X-K3 / K3 Flash serving.
+#
+# Replaces Dynamo 1.6.1 with ai-dynamo 1.6.2 (PyPI) and the SeungminHeo/dynamo
+# release axiom-runtime-1.6.2-c50e1abbfdf7, whose Rust frontend carries the
+# Solar reasoning/tool parsing (reasoning ends only at <|think:end|>), the
+# backend repetition finish reason and the A.X-K3 `ax_k3` tool / reasoning
+# parser (call_group_policy="all"). Serve K3 with:
+#   python3 -m dynamo.frontend --dyn-chat-processor dynamo \
+#       --dyn-tool-call-parser ax_k3 --dyn-reasoning-parser ax_k3 ...
+#
+# The build context holds both wheels, checked against the SHA-256 pins below:
+#  * ai_dynamo-1.6.2-py3-none-any.whl: PyPI.
+#  * ai_dynamo_runtime-1.6.2-cp310-abi3-manylinux_2_28_x86_64.whl: release
+#    asset (workflow run 42984543602).
+# Only ai-dynamo, ai-dynamo-runtime and aisimulate move; every other package
+# stays where the base has it. The base image's four Dynamo patches are
+# re-applied to the 1.6.2 files.
+#
+# Build (amd64), on top of a pushed Dockerfile.axiom-dynamo image:
+#   mkdir <ctx> && cp ai_dynamo-1.6.2-py3-none-any.whl \
+#       ai_dynamo_runtime-1.6.2-cp310-abi3-manylinux_2_28_x86_64.whl <ctx>/
+#   podman build --platform linux/amd64 -f docker/Dockerfile.axiom-dynamo-axk3 \
+#       --build-arg BASE_IMAGE=<registry>/vllm-runtime:<sha9>-axiom-dynamo1.6.1-axiomrt<rev12> \
+#       --build-arg VLLM_SRC_COMMIT=$(git rev-parse HEAD) \
+#       -t <registry>/vllm-runtime:<sha9>-axiom-dynamo1.6.2-axiomrt<rev12> <ctx>
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG PYTHON_VERSION=3.12
+# uv segfaults under qemu user emulation; override with
+# --build-arg INSTALLER="python3 -m pip install" for cross-arch local builds.
+ARG INSTALLER="uv pip install --system"
+ARG DYNAMO_VERSION=1.6.2
+ARG DYNAMO_RUNTIME_COMMIT=c50e1abbfdf79063fc8900b51a962ea24281cf96
+ARG DYNAMO_SHA256=91c6c35ef02bee0fcbbbf6c3b42e97010aa6cc5d9180557852057b25df5cd84c
+ARG DYNAMO_RUNTIME_SHA256=237f425b6534bead97e19406a18a38a315a0a16fb771806f302a2e1de94cbc22
+ARG NIXL_VERSION=1.5.2
+ARG VLLM_SITE=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm
+ARG DYNAMO_SITE=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/dynamo
+
+COPY ai_dynamo-${DYNAMO_VERSION}-py3-none-any.whl \
+     ai_dynamo_runtime-${DYNAMO_VERSION}-cp310-abi3-manylinux_2_28_x86_64.whl \
+     /tmp/axk3-wheel/
+
+RUN cd /tmp/axk3-wheel \
+    && printf '%s  %s\n%s  %s\n' \
+        "${DYNAMO_SHA256}" "ai_dynamo-${DYNAMO_VERSION}-py3-none-any.whl" \
+        "${DYNAMO_RUNTIME_SHA256}" "ai_dynamo_runtime-${DYNAMO_VERSION}-cp310-abi3-manylinux_2_28_x86_64.whl" \
+        | sha256sum -c - \
+    && python3 -m pip list --format=freeze \
+        | grep -viE '^(ai-dynamo|ai-dynamo-runtime|aisimulate|certifi|pydantic(-core|_core)?|googleapis-common-protos)==' \
+        > /tmp/base-constraints.txt \
+    && env -u UV_OVERRIDE ${INSTALLER} -c /tmp/base-constraints.txt \
+        ./ai_dynamo-${DYNAMO_VERSION}-py3-none-any.whl \
+        ./ai_dynamo_runtime-${DYNAMO_VERSION}-cp310-abi3-manylinux_2_28_x86_64.whl \
+    && cd / \
+    && rm -rf /tmp/axk3-wheel /tmp/base-constraints.txt \
+    && python3 -c "\
+import importlib.metadata as md, importlib.util; \
+assert md.version('ai-dynamo') == md.version('ai-dynamo-runtime') == '${DYNAMO_VERSION}'; \
+assert md.version('nixl-cu13') == '${NIXL_VERSION}', md.version('nixl-cu13'); \
+from dynamo._core import get_reasoning_parser_names, get_tool_parser_names; \
+tools, reasoning = set(get_tool_parser_names()), set(get_reasoning_parser_names()); \
+assert {'ax_k3', 'solar_open2', 'hermes'} <= tools, sorted(tools); \
+assert {'ax_k3', 'solar_open2'} <= reasoning, sorted(reasoning); \
+assert all(importlib.util.find_spec(m) for m in ('dynamo.vllm', 'dynamo.frontend'))"
+
+# Same four Dynamo patches as Dockerfile.axiom-dynamo (see the comments there):
+# get_engine_zmq_addresses stub (vllm#54113), InstrumentedScheduler
+# skipped_waiting fallback, vllm.renderers.chat_utils imports, and the opt-in
+# request-level engine warmup (AXIOM_DYNAMO_WARMUP=1).
+RUN f=${DYNAMO_SITE}/vllm/embedding_worker_processes.py \
+    && grep -qx 'from vllm.v1.engine.utils import get_engine_zmq_addresses, launch_core_engines' $f \
+    && sed -i 's|^from vllm.v1.engine.utils import get_engine_zmq_addresses, launch_core_engines$|from vllm.v1.engine.utils import launch_core_engines\n\n\ndef get_engine_zmq_addresses(*args, **kwargs):\n    raise RuntimeError("--embedding-worker-processes > 1 is not supported on this vLLM (vllm-project/vllm#54113)")|' $f \
+    && python3 -c "import ast; ast.parse(open('$f').read())" \
+    && f=${DYNAMO_SITE}/vllm/instrumented_scheduler.py \
+    && grep -qx '            other_waiting = self.skipped_waiting' $f \
+    && sed -i 's|^            other_waiting = self.skipped_waiting$|            other_waiting = getattr(self, "skipped_waiting", ())|' $f \
+    && python3 -c "import ast; ast.parse(open('$f').read())" \
+    && cd ${DYNAMO_SITE} \
+    && grep -qx 'from vllm.entrypoints.chat_utils import make_tool_call_id' frontend/prepost.py \
+    && grep -qx 'from vllm.entrypoints.chat_utils import load_chat_template' frontend/vllm_processor.py \
+    && grep -qx '    from vllm.entrypoints.chat_utils import load_chat_template' vllm/realtime/factories.py \
+    && sed -i 's|^\( *\)from vllm.entrypoints.chat_utils import|\1from vllm.renderers.chat_utils import|' \
+        frontend/prepost.py frontend/vllm_processor.py vllm/realtime/factories.py \
+    && ! grep -rq --include='*.py' 'vllm.entrypoints.chat_utils' frontend vllm \
+    && f=${DYNAMO_SITE}/vllm/worker_factory.py \
+    && test -f ${VLLM_SITE}/axiom/dynamo_warmup.py \
+    && grep -qx 'from .cache_info import configure_kv_event_block_size' $f \
+    && sed -i 's|^from \.cache_info import configure_kv_event_block_size$|from vllm.axiom.dynamo_warmup import with_engine_warmup\n\nfrom .cache_info import configure_kv_event_block_size as _configure_kv_event_block_size\n\nconfigure_kv_event_block_size = with_engine_warmup(_configure_kv_event_block_size)|' $f \
+    && grep -qx 'configure_kv_event_block_size = with_engine_warmup(_configure_kv_event_block_size)' $f \
+    && python3 -c "import ast; ast.parse(open('$f').read())" \
+    && find ${DYNAMO_SITE} -name __pycache__ -type d -prune -exec rm -rf {} +
+
+RUN python3 -c "import dynamo.vllm.main, dynamo.frontend.main, dynamo.vllm.embedding_worker_processes"
+
+ARG BASE_IMAGE
+ARG VLLM_SRC_COMMIT=unknown
+LABEL org.opencontainers.image.revision="${VLLM_SRC_COMMIT}" \
+      ai.skt.dynamo.version="${DYNAMO_VERSION}" \
+      ai.skt.dynamo.sha256="${DYNAMO_SHA256}" \
+      ai.skt.dynamo.runtime_release="axiom-runtime-1.6.2-c50e1abbfdf7" \
+      ai.skt.dynamo.runtime_revision="${DYNAMO_RUNTIME_COMMIT}" \
+      ai.skt.dynamo.runtime_sha256="${DYNAMO_RUNTIME_SHA256}" \
+      ai.skt.axk3.base_image="${BASE_IMAGE}"
