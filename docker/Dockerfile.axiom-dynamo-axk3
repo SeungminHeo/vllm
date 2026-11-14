@@ -1,18 +1,19 @@
-# Dynamo 1.6.2 + integrated Axiom runtime variant of the AXIOM Dynamo image
+# Dynamo 1.6.2 + Axiom runtime variant of the AXIOM Dynamo image
 # (docker/Dockerfile.axiom-dynamo), for A.X-K3 / K3 Flash serving.
 #
 # Replaces Dynamo 1.6.1 with ai-dynamo 1.6.2 (PyPI) and the SeungminHeo/dynamo
-# release axiom-runtime-1.6.2-c50e1abbfdf7, whose Rust frontend carries the
+# release axiom-runtime-1.6.2-ad328edf227f, whose Rust frontend carries the
 # Solar reasoning/tool parsing (reasoning ends only at <|think:end|>), the
-# backend repetition finish reason and the A.X-K3 `ax_k3` tool / reasoning
-# parser (call_group_policy="all"). Serve K3 with:
+# Hermes marker policy, the frontend repetition stop (DYN_REPETITION_DETECTION,
+# finish reason `repetition`) and the A.X-K3 `ax_k3` tool / reasoning parser
+# (call_group_policy="all"). Serve K3 with:
 #   python3 -m dynamo.frontend --dyn-chat-processor dynamo \
 #       --dyn-tool-call-parser ax_k3 --dyn-reasoning-parser ax_k3 ...
 #
 # The build context holds both wheels, checked against the SHA-256 pins below:
 #  * ai_dynamo-1.6.2-py3-none-any.whl: PyPI.
 #  * ai_dynamo_runtime-1.6.2-cp310-abi3-manylinux_2_28_x86_64.whl: release
-#    asset (workflow run 42984543602).
+#    asset (workflow run 43586466882).
 # Only ai-dynamo, ai-dynamo-runtime and aisimulate move; every other package
 # stays where the base has it. The base image's four Dynamo patches are
 # re-applied to the 1.6.2 files.
@@ -32,9 +33,9 @@ ARG PYTHON_VERSION=3.12
 # --build-arg INSTALLER="python3 -m pip install" for cross-arch local builds.
 ARG INSTALLER="uv pip install --system"
 ARG DYNAMO_VERSION=1.6.2
-ARG DYNAMO_RUNTIME_COMMIT=c50e1abbfdf79063fc8900b51a962ea24281cf96
+ARG DYNAMO_RUNTIME_COMMIT=ad328edf227f222854622e23dc708b36eb0407b6
 ARG DYNAMO_SHA256=91c6c35ef02bee0fcbbbf6c3b42e97010aa6cc5d9180557852057b25df5cd84c
-ARG DYNAMO_RUNTIME_SHA256=237f425b6534bead97e19406a18a38a315a0a16fb771806f302a2e1de94cbc22
+ARG DYNAMO_RUNTIME_SHA256=4d7bc5b0f17533dd4204ed1a7a418da1e6a34f18c00a323d3f7531ec1b167dd7
 ARG NIXL_VERSION=1.5.2
 ARG VLLM_SITE=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm
 ARG DYNAMO_SITE=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/dynamo
@@ -100,7 +101,7 @@ ARG VLLM_SRC_COMMIT=unknown
 LABEL org.opencontainers.image.revision="${VLLM_SRC_COMMIT}" \
       ai.skt.dynamo.version="${DYNAMO_VERSION}" \
       ai.skt.dynamo.sha256="${DYNAMO_SHA256}" \
-      ai.skt.dynamo.runtime_release="axiom-runtime-1.6.2-c50e1abbfdf7" \
+      ai.skt.dynamo.runtime_release="axiom-runtime-1.6.2-ad328edf227f" \
       ai.skt.dynamo.runtime_revision="${DYNAMO_RUNTIME_COMMIT}" \
       ai.skt.dynamo.runtime_sha256="${DYNAMO_RUNTIME_SHA256}" \
       ai.skt.axk3.base_image="${BASE_IMAGE}"
