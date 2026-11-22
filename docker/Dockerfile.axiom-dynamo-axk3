@@ -1,12 +1,13 @@
 # A.X-K3 / K3 Flash parser variant of the AXIOM Dynamo runtime image
 # (docker/Dockerfile.axiom-dynamo).
 #
-# Replaces Dynamo 1.6.1 with Dynamo 1.7.0 from the SeungminHeo/dynamo CI
-# build of work/solar-tool-arg-streaming-1.7.0 at dc933fc1e90d (release line
+# Replaces Dynamo 1.6.1 with Dynamo 1.7.0 from the KBTECHLAB/axiom/dynamo
+# release axiom-runtime-1.7.0-0357b66eabb7 (dc933fc1e90d, i.e. release line
 # axiom/release/1.7.0 plus streamed Solar Open2 tool calls and the repetition
-# stop reported as a truncation, on upstream release/1.7.0): Solar
-# reasoning/tool parsing, the frontend repetition stop
-# (DYN_REPETITION_DETECTION, reported to clients as `length`), the Hermes
+# stop reported as a truncation, plus Solar `xhigh` reasoning and tool-call ID
+# validation, on upstream release/1.7.0): Solar reasoning/tool parsing, the
+# frontend repetition stop (DYN_REPETITION_DETECTION, reported to clients as
+# `length`), the Hermes
 # marker policy, empty tools for
 # unforced chat, the opt-in strict-schema migration env
 # (DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION) and the `ax_k3` tool /
@@ -16,10 +17,19 @@
 #       --dyn-tool-call-parser ax_k3 --dyn-reasoning-parser ax_k3 ...
 # The `solar_open2` and `hermes` parsers stay registered.
 #
+# The release's companion Solar Open2 chat template is installed at
+# /opt/axiom/templates/solar_open2.jinja; it only takes effect on workers
+# started with --custom-jinja-template /opt/axiom/templates/solar_open2.jinja.
+#
+# ModelExpress 0.8.0 (vLLM `--load-format mx`, fast weight loading) is added
+# with its missing dependencies only: every package already in the image is
+# held at its installed version, and the build loads the vLLM plugin entry
+# point the way vLLM does at startup.
+#
 # ai-dynamo 1.7.0 is not on PyPI, so the build context holds both wheels of
 # the same Dynamo commit, checked against the SHA-256 pins below:
-#  * ai_dynamo_runtime-1.7.0-cp311-abi3-manylinux_2_28_x86_64.whl: Actions
-#    artifact (workflow run 43831714495).
+#  * ai_dynamo_runtime-1.7.0-cp311-abi3-manylinux_2_28_x86_64.whl: release
+#    asset (Actions run 44739699921), next to solar_open2.jinja.
 #  * ai_dynamo-1.7.0-py3-none-any.whl: `uv build --wheel` of 2600fd02 (pure
 #    Python: dynamo.frontend, dynamo.vllm, ...; the runtime commit changes
 #    only Rust on top of it).
@@ -34,7 +44,7 @@
 # re-applied to the 1.7.0 files below.
 #
 # Build (amd64), on top of a pushed or locally built Dockerfile.axiom-dynamo image:
-#   mkdir <ctx> && cp ai_dynamo-1.7.0-py3-none-any.whl \
+#   mkdir <ctx> && cp ai_dynamo-1.7.0-py3-none-any.whl solar_open2.jinja \
 #       ai_dynamo_runtime-1.7.0-cp311-abi3-manylinux_2_28_x86_64.whl <ctx>/
 #   podman build --platform linux/amd64 -f docker/Dockerfile.axiom-dynamo-axk3 \
 #       --build-arg BASE_IMAGE=<registry>/vllm-runtime:<sha9>-axiom-dynamo1.6.1-axiomrt<rev12> \
@@ -48,11 +58,13 @@ ARG PYTHON_VERSION=3.12
 # --build-arg INSTALLER="python3 -m pip install" for cross-arch local builds.
 ARG INSTALLER="uv pip install --system"
 ARG DYNAMO_VERSION=1.7.0
-ARG DYNAMO_COMMIT=dc933fc1e90de000f945a8942743a0281bff6dec
+ARG DYNAMO_COMMIT=0357b66eabb7909deffda7e309b2f1665df5ca4d
 ARG DYNAMO_PARSER_COMMIT=e61ce1b13161c46e3d698d847d591b0edf1c684e
 ARG DYNAMO_PARSER_V2_COMMIT=6f8848249e721d1ebcd5bfbfb523fec7e26531a6
 ARG DYNAMO_SHA256=3b00f966e98ba21518ff2462e34f01cfad483f1661469a624f8250395d308bf8
-ARG DYNAMO_RUNTIME_SHA256=d6c43ca48bbbf7554177c7bfdbb6e01dd68b9889a08a8e9c91b48dc3f5ab06cd
+ARG DYNAMO_RUNTIME_SHA256=7b1293116815d8e1a608c20a9c36cd37b1fc2c25ad9b1e5a08ac4d51ae7ac476
+ARG SOLAR_TEMPLATE_SHA256=d98af4f1f498bca0faa2986b17afd4b490a0936ed9da844b45a8f63de47ab5ac
+ARG MODELEXPRESS_VERSION=0.8.0
 ARG NIXL_VERSION=1.5.2
 ARG VLLM_SITE=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm
 ARG DYNAMO_SITE=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/dynamo
@@ -98,6 +110,35 @@ for req in map(Requirement, requires("ai-dynamo")):
 assert not unmet, unmet
 EOF
 
+COPY solar_open2.jinja /opt/axiom/templates/solar_open2.jinja
+RUN echo "${SOLAR_TEMPLATE_SHA256}  /opt/axiom/templates/solar_open2.jinja" | sha256sum -c - \
+    && chmod 0644 /opt/axiom/templates/solar_open2.jinja
+
+# The first distribution of a name on sys.path is the one Python imports;
+# /usr/lib/python3/dist-packages also carries older Ubuntu copies of some.
+RUN cat > /tmp/held.py <<'EOF'
+import importlib.metadata as md
+
+held = {}
+for dist in md.distributions():
+    if dist.metadata["Name"]:
+        held.setdefault(dist.metadata["Name"].lower().replace("_", "-"), dist.version)
+print("".join(f"{name}=={ver}\n" for name, ver in sorted(held.items())), end="")
+EOF
+RUN python3 /tmp/held.py > /tmp/held-before.txt \
+    && ${INSTALLER} --constraint /tmp/held-before.txt "modelexpress==${MODELEXPRESS_VERSION}" \
+    && python3 /tmp/held.py > /tmp/held-after.txt \
+    && python3 -c "\
+from importlib.metadata import entry_points, version; \
+before = set(open('/tmp/held-before.txt')); after = set(open('/tmp/held-after.txt')); \
+assert not before - after, sorted(before - after); \
+print('added:', sorted(after - before)); \
+assert version('modelexpress') == '${MODELEXPRESS_VERSION}', version('modelexpress'); \
+eps = [ep for ep in entry_points(group='vllm.general_plugins') if ep.name == 'modelexpress']; \
+assert eps, 'modelexpress vllm.general_plugins entry point not found'; \
+[ep.load()() for ep in eps]" \
+    && rm -f /tmp/held.py /tmp/held-before.txt /tmp/held-after.txt
+
 # InstrumentedScheduler (injected when the operator sets
 # DYN_FORWARDPASS_METRIC_PORT) reads Scheduler.skipped_waiting when the
 # vLLM 0.31 kv_holding_waiting queue is absent; vLLM main has neither (blocked
@@ -131,8 +172,10 @@ LABEL org.opencontainers.image.revision="${VLLM_SRC_COMMIT}" \
       ai.skt.dynamo.revision="${DYNAMO_COMMIT}" \
       ai.skt.dynamo.parser_revision="${DYNAMO_PARSER_COMMIT}" \
       ai.skt.dynamo.parser_v2_revision="${DYNAMO_PARSER_V2_COMMIT}" \
-      ai.skt.dynamo.runtime_release="work/solar-tool-arg-streaming-1.7.0@dc933fc1e90d" \
+      ai.skt.dynamo.runtime_release="axiom-runtime-1.7.0-0357b66eabb7" \
       ai.skt.dynamo.runtime_revision="${DYNAMO_COMMIT}" \
       ai.skt.dynamo.runtime_sha256="${DYNAMO_RUNTIME_SHA256}" \
       ai.skt.dynamo.sha256="${DYNAMO_SHA256}" \
+      ai.skt.dynamo.solar_template_sha256="${SOLAR_TEMPLATE_SHA256}" \
+      ai.skt.modelexpress.version="${MODELEXPRESS_VERSION}" \
       ai.skt.axk3.base_image="${BASE_IMAGE}"
